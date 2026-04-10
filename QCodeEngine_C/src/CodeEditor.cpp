@@ -75,12 +75,15 @@ void InnerEditor::paintEvent(QPaintEvent* e) {
             if (d_ptr->m_foldManager->isFolded(blockNumber)) {
                 QString text = block.text();
                 QFontMetrics fm(font());
-                // For a more accurate position due to tab expansion, we can use cursor layout, but fm.horizontalAdvance works decently as a fallback
                 int textWidth = fm.horizontalAdvance(text.replace('\t', QString(d_ptr->m_tabWidth, ' ')));
-                
+                int blockH    = (int)(bottom - top); // actual row height (fixed at 26 px by style)
+
                 painter.save();
-                painter.setPen(d_ptr->m_theme.tokenComment); // Faded color
-                painter.drawText(textWidth + 8, top, fm.horizontalAdvance(" [...]"), fm.height(), Qt::AlignLeft | Qt::AlignVCenter, " [...]");
+                painter.setPen(d_ptr->m_theme.tokenComment);
+                // Use the full block height so AlignVCenter lands in the middle of the row.
+                painter.drawText(textWidth + 8, (int)top,
+                                 fm.horizontalAdvance(" [...]"), blockH,
+                                 Qt::AlignLeft | Qt::AlignVCenter, " [...]");
                 painter.restore();
             }
         }
@@ -305,6 +308,21 @@ void CodeEditorPrivate::toggleLineComment() {
 }
 
 void CodeEditorPrivate::onCursorPositionChanged() {
+    // ── Auto-unfold guard ──────────────────────────────────────────────────
+    // If the cursor somehow lands on a hidden block (e.g. the user arrowed
+    // into a folded region), find the fold that contains it and open it so
+    // the cursor is never stranded inside invisible text.
+    {
+        QTextBlock curBlock = m_editor->textCursor().block();
+        if (!curBlock.isVisible()) {
+            int foldStart = m_foldManager->findFoldContaining(curBlock.blockNumber());
+            if (foldStart >= 0) {
+                m_foldManager->toggleFold(foldStart);
+                m_gutter->update();
+            }
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────
     updateBracketMatch();
     updateCurrentLineHighlight();
     int blockNum = m_editor->textCursor().blockNumber();

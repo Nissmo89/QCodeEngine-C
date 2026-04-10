@@ -50,6 +50,18 @@ int FoldManager::foldEndBlock(int blockNumber) const {
     return m_foldRanges.value(blockNumber, -1);
 }
 
+int FoldManager::findFoldContaining(int blockNumber) const {
+    for (const auto& f : m_activeFolds) {
+        int s = f.start.blockNumber();
+        int e = f.end.blockNumber();
+        // blockNumber is *inside* the fold if it is strictly after the start
+        // and at-or-before the end (the end line itself is hidden too).
+        if (blockNumber > s && blockNumber <= e)
+            return s;
+    }
+    return -1;
+}
+
 void FoldManager::foldAll() {
     if (!m_doc) return;
     QList<QPair<int, int>> toHide;
@@ -122,9 +134,14 @@ void FoldManager::collectFoldRanges(void* nodeRaw, QMap<int,int>& out) {
     TSNode* pNode = static_cast<TSNode*>(nodeRaw);
     TSNode node = *pNode;
 
+    // NOTE: "compound_statement" is intentionally excluded here.
+    // It is always a child of one of the parent nodes below (function_definition,
+    // if_statement, etc.) and starts on the same line.  Including it caused
+    // duplicate fold arrows for K&R-style code where the opening brace lives on
+    // its own line (both the parent node and the compound_statement would each
+    // register a foldable entry for adjacent lines).
     static const QSet<QString> FOLDABLE_TYPES = {
         "function_definition",
-        "compound_statement",
         "struct_specifier",
         "union_specifier",
         "enum_specifier",

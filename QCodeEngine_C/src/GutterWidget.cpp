@@ -177,12 +177,20 @@ void GutterWidget::paintEvent(QPaintEvent* event) {
                 m_iconRects[blockNumber] = QRect(ix, (int)top, iconSize, ht);
             }
 
-            // ---- Fold arrow ----
+            // ---- Fold arrow ────────────────────────────────────────────────
+            // Show the arrow only when:
+            //   • the block is already folded (collapsed indicator must always
+            //     be visible so the user knows content is hidden), OR
+            //   • the mouse is hovering this exact gutter row.
+            // This mirrors VS Code / Zed behaviour and keeps the gutter clean.
             if (m_showFolding && m_foldManager && m_foldManager->isFoldable(blockNumber)) {
-                bool folded = m_foldManager->isFolded(blockNumber);
-                int fx = foldArrowX();
-                drawFoldArrow(painter, folded, fx, (int)top, ht);
-                m_foldArrowRects[blockNumber] = QRect(fx, (int)top, arrowSize + 4, ht);
+                bool folded  = m_foldManager->isFolded(blockNumber);
+                bool visible = folded || isHovered;
+                if (visible) {
+                    int fx = foldArrowX();
+                    drawFoldArrow(painter, folded, fx, (int)top, ht);
+                    m_foldArrowRects[blockNumber] = QRect(fx, (int)top, arrowSize + 4, ht);
+                }
             }
         }
 
@@ -220,10 +228,14 @@ void GutterWidget::mousePressEvent(QMouseEvent* event) {
 }
 
 void GutterWidget::mouseMoveEvent(QMouseEvent* event) {
-    // Determine which block the mouse is hovering over
+    // Hover detection: use the full gutter width for each row so the fold-arrow
+    // column also triggers the hover highlight (previously only the line-number
+    // sub-rect was tested, meaning hovering directly over an arrow did nothing).
     int newHovered = -1;
+    int fullW = width();
     for (auto it = m_lineNumberRects.begin(); it != m_lineNumberRects.end(); ++it) {
-        if (it.value().contains(event->pos())) {
+        QRect fullRow(0, it.value().top(), fullW, it.value().height());
+        if (fullRow.contains(event->pos())) {
             newHovered = it.key();
             break;
         }

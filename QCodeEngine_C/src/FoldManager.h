@@ -25,6 +25,10 @@ public:
 
     int foldEndBlock(int blockNumber) const;
 
+    // Returns the start-block of whichever active fold *contains* blockNumber
+    // (i.e. blockNumber is hidden inside that fold).  Returns -1 if none.
+    int findFoldContaining(int blockNumber) const;
+
 signals:
     void foldChanged(int blockNumber, bool folded);
     void foldRangesUpdated();

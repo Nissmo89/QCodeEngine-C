@@ -1,6 +1,0 @@
-[submodule "QCodeEditor/third_party/tree-sitter"]
-	path = QCodeEditor/third_party/tree-sitter
-	url = https://github.com/tree-sitter/tree-sitter.git
-[submodule "QCodeEditor/third_party/tree-sitter-c"]
-	path = QCodeEditor/third_party/tree-sitter-c
-	url = https://github.com/tree-sitter/tree-sitter-c.git
