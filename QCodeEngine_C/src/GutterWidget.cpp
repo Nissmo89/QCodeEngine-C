@@ -2,6 +2,7 @@
 //  GutterWidget.cpp  –  QCodeEngine-C
 // ============================================================================
 #include "CodeEditor/GutterWidget.h"
+#include "CodeEditor_p.h"
 
 #include <QAbstractTextDocumentLayout>
 #include <QTextBlock>
@@ -22,28 +23,38 @@
 // ─────────────────────────────────────────────────────────────────────────────
 namespace {
 
-// Y-offset (viewport-relative) of the TOP of a text block
-int blockTopY(QPlainTextEdit *ed, const QTextBlock &b)
-{
-    if (!b.isValid()) return -1;
-    qreal top = ed->document()
-                 ->documentLayout()
-                 ->blockBoundingRect(b).top();
-    top += ed->document()->documentMargin();
-    return qRound(top - ed->verticalScrollBar()->value());
-}
+// ─── Block iteration helpers ────────────────────────────────────────────────
+//
+// WHY NOT documentLayout()->blockBoundingRect(b) for every block?
+//
+//   QPlainTextDocumentLayout is lazy: blocks that have never scrolled into view
+//   are not yet laid out.  Their blockBoundingRect() returns a zeroed-out rect
+//   (top = 0, height = default), so iterating from document()->begin() causes
+//   every off-screen block to report top = 0.  All gutter decorations (fold
+//   arrows, line numbers) then stack at y = 0 — looks like "one mark at the
+//   wrong position."
+//
+// THE FIX – standard Qt gutter pattern:
+//   1. Get the first visible block via cursorForPosition(0,0).  That block is
+//      guaranteed to be already laid out by the editor viewport.
+//   2. Compute its viewport-Y via documentLayout (reliable because it IS laid out).
+//   3. Walk forward, accumulating heights.  Hidden blocks have height = 0 in the
+//      layout, so they do not advance Y and are naturally skipped.
 
-// Pixel height of one text block
-int blockH(QPlainTextEdit *ed, const QTextBlock &b)
+static QTextBlock startBlockIter(InnerEditor *ed, qreal &outTopF)
 {
-    if (!b.isValid()) return ed->fontMetrics().height();
-    return qRound(ed->document()
-                    ->documentLayout()
-                    ->blockBoundingRect(b).height());
+    QTextBlock b = ed->firstVisibleBlock();
+    if (!b.isValid())
+        b = ed->document()->begin();
+
+    outTopF = ed->blockBoundingGeometry(b)
+                  .translated(ed->contentOffset())
+                  .top();
+    return b;
 }
 
 // Block whose bounding rect contains viewport-y  (invalid on miss)
-QTextBlock blockAtViewportY(QPlainTextEdit *ed, int y)
+QTextBlock blockAtViewportY(InnerEditor *ed, int y)
 {
     if (!ed) return {};
     // cursorForPosition clamps – safe even outside text area
@@ -93,7 +104,7 @@ QPixmap makeBookmarkPx(int sz = 12)
 // ═════════════════════════════════════════════════════════════════════════════
 //  MarginArea
 // ═════════════════════════════════════════════════════════════════════════════
-MarginArea::MarginArea(QPlainTextEdit *editor, QWidget *parent)
+MarginArea::MarginArea(InnerEditor *editor, QWidget *parent)
     : QWidget(parent), m_ed(editor)
 {
     setFixedWidth(WIDTH);
@@ -135,14 +146,22 @@ void MarginArea::paintEvent(QPaintEvent *e)
     QPainter p(this);
     p.fillRect(e->rect(), palette().window());
 
-    for (QTextBlock b = m_ed->document()->begin(); b.isValid(); b = b.next()) {
-        int top = blockTopY(m_ed, b);
-        int h   = blockH(m_ed, b);
-        if (top + h < e->rect().top())  continue;
-        if (top > e->rect().bottom())   break;
+    qreal topF;
+    QTextBlock b = startBlockIter(m_ed, topF);
+    while (b.isValid()) {
+        qreal hF  = m_ed->blockBoundingGeometry(b).height();
+        int   top = qRound(topF);
+        int   h   = qRound(hF);
 
-        MarkerFlags f = markersAt(lineNo(b));
-        if (f) drawMarkers(p, QRect(1, top + 1, WIDTH - 2, h - 2), f);
+        if (topF > e->rect().bottom()) break;
+
+        if (b.isVisible() && topF + hF >= e->rect().top()) {
+            MarkerFlags f = markersAt(lineNo(b));
+            if (f) drawMarkers(p, QRect(1, top + 1, WIDTH - 2, qMax(1, h - 2)), f);
+        }
+
+        b = b.next();
+        topF += hF;
     }
 }
 
@@ -151,7 +170,7 @@ void MarginArea::drawMarkers(QPainter &p, const QRect &r, MarkerFlags f) const
     auto blit = [&](const QPixmap &pix) {
         if (pix.isNull()) return;
         p.drawPixmap(r, pix.scaled(r.size(), Qt::KeepAspectRatio,
-                                              Qt::SmoothTransformation));
+                                   Qt::SmoothTransformation));
     };
     // Priority: Error > Warning > Breakpoint > Tracepoint > Bookmark > Info
     if (f.testFlag(MarkerType::Error))      { blit(px(MarkerType::Error));      return; }
@@ -227,7 +246,7 @@ void MarginArea::contextMenuEvent(QContextMenuEvent *e)
 // ═════════════════════════════════════════════════════════════════════════════
 //  LineNumberArea
 // ═════════════════════════════════════════════════════════════════════════════
-LineNumberArea::LineNumberArea(QPlainTextEdit *editor, QWidget *parent)
+LineNumberArea::LineNumberArea(InnerEditor *editor, QWidget *parent)
     : QWidget(parent), m_ed(editor)
 {
     setFixedWidth(preferredWidth());
@@ -256,28 +275,33 @@ void LineNumberArea::paintEvent(QPaintEvent *e)
 
     QFont baseFont = m_ed->font();
 
-    for (QTextBlock b = m_ed->document()->begin(); b.isValid(); b = b.next()) {
-        int top = blockTopY(m_ed, b);
-        int h   = blockH(m_ed, b);
-        int ln  = lineNo(b);
+    qreal topF;
+    QTextBlock b = startBlockIter(m_ed, topF);
+    while (b.isValid()) {
+        qreal hF  = m_ed->blockBoundingGeometry(b).height();
+        int   top = qRound(topF);
+        int   h   = qRound(hF);
+        int   ln  = lineNo(b);
 
-        if (top + h < e->rect().top())  continue;
-        if (top > e->rect().bottom())   break;
+        if (topF > e->rect().bottom()) break;
 
-        if (ln == m_curLine) {
-            // Current line: bold + highlight colour
-            QFont bold = baseFont;
-            bold.setBold(true);
-            p.setFont(bold);
-            p.setPen(palette().color(QPalette::Highlight));
-        } else {
-            p.setFont(baseFont);
-            p.setPen(palette().color(QPalette::Text));
+        if (b.isVisible() && topF + hF >= e->rect().top()) {
+            if (ln == m_curLine) {
+                QFont bold = baseFont;
+                bold.setBold(true);
+                p.setFont(bold);
+                p.setPen(palette().color(QPalette::Highlight));
+            } else {
+                p.setFont(baseFont);
+                p.setPen(palette().color(QPalette::Text));
+            }
+            p.drawText(0, top, width() - PAD / 2, qMax(1, h),
+                       Qt::AlignRight | Qt::AlignVCenter,
+                       QString::number(ln));
         }
 
-        p.drawText(0, top, width() - PAD / 2, h,
-                   Qt::AlignRight | Qt::AlignVCenter,
-                   QString::number(ln));
+        b = b.next();
+        topF += hF;
     }
 }
 
@@ -294,7 +318,7 @@ void LineNumberArea::mousePressEvent(QMouseEvent *e)
 // ═════════════════════════════════════════════════════════════════════════════
 //  FoldArea
 // ═════════════════════════════════════════════════════════════════════════════
-FoldArea::FoldArea(QPlainTextEdit *editor, QWidget *parent)
+FoldArea::FoldArea(InnerEditor *editor, QWidget *parent)
     : QWidget(parent), m_ed(editor)
 {
     setFixedWidth(WIDTH);
@@ -332,20 +356,25 @@ void FoldArea::paintEvent(QPaintEvent *e)
     for (int i = 0; i < m_ranges.size(); ++i)
         idx[m_ranges[i].startLine] = i;
 
-    for (QTextBlock b = m_ed->document()->begin(); b.isValid(); b = b.next()) {
-        int top = blockTopY(m_ed, b);
-        int h   = blockH(m_ed, b);
-        int ln  = lineNo(b);
+    qreal topF;
+    QTextBlock b = startBlockIter(m_ed, topF);
+    while (b.isValid()) {
+        qreal hF  = m_ed->blockBoundingGeometry(b).height();
+        int   top = qRound(topF);
+        int   h   = qRound(hF);
+        int   ln  = lineNo(b);
 
-        if (top + h < e->rect().top())  continue;
-        if (top > e->rect().bottom())   break;
+        if (topF > e->rect().bottom()) break;
 
-        if (!idx.contains(ln)) continue;
+        if (b.isVisible() && topF + hF >= e->rect().top() && idx.contains(ln)) {
+            const FoldRange &fr = m_ranges[idx[ln]];
+            int side = qMin(qMax(1, h - 2), WIDTH - 2);
+            QRect arrowR((WIDTH - side) / 2, top + (h - side) / 2, side, side);
+            drawArrow(p, arrowR, fr.folded, ln == m_hovered);
+        }
 
-        const FoldRange &fr = m_ranges[idx[ln]];
-        int side = qMin(h - 2, WIDTH - 2);
-        QRect arrowR((WIDTH - side) / 2, top + (h - side) / 2, side, side);
-        drawArrow(p, arrowR, fr.folded, ln == m_hovered);
+        b = b.next();
+        topF += hF;
     }
 }
 
@@ -405,7 +434,7 @@ FoldArea::FoldRange *FoldArea::rangeAt(int line)
 // ═════════════════════════════════════════════════════════════════════════════
 //  GutterWidget
 // ═════════════════════════════════════════════════════════════════════════════
-GutterWidget::GutterWidget(QPlainTextEdit *editor, QWidget *parent)
+GutterWidget::GutterWidget(InnerEditor *editor, QWidget *parent)
     : QWidget(parent)
     , m_ed(editor)
     , m_margin (new MarginArea    (editor, this))
@@ -430,8 +459,8 @@ GutterWidget::GutterWidget(QPlainTextEdit *editor, QWidget *parent)
 int GutterWidget::totalWidth() const
 {
     return MarginArea::WIDTH
-         + m_lineNum->preferredWidth()
-         + FoldArea::WIDTH;
+           + m_lineNum->preferredWidth()
+           + FoldArea::WIDTH;
 }
 
 void GutterWidget::relayout()
@@ -442,17 +471,17 @@ void GutterWidget::relayout()
     int foldW = m_fold->isVisible() ? FoldArea::WIDTH : 0;
 
     m_margin ->setGeometry(0,
-                           0,
-                           MarginArea::WIDTH,
-                           h);
+                          0,
+                          MarginArea::WIDTH,
+                          h);
     m_lineNum->setGeometry(MarginArea::WIDTH,
                            0,
                            lnW,
                            h);
     m_fold   ->setGeometry(MarginArea::WIDTH + lnW,
-                           0,
-                           foldW,
-                           h);
+                        0,
+                        foldW,
+                        h);
 }
 
 void GutterWidget::updateWidth()

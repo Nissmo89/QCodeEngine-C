@@ -24,6 +24,8 @@ class QEvent;
 class QResizeEvent;
 QT_END_NAMESPACE
 
+class InnerEditor;
+
 // ─────────────────────────────────────────────────────────────────────────────
 //  MarkerType  ·  what can live in the left margin
 // ─────────────────────────────────────────────────────────────────────────────
@@ -48,7 +50,7 @@ class MarginArea : public QWidget
 public:
     static constexpr int WIDTH = 18;
 
-    explicit MarginArea(QPlainTextEdit *editor, QWidget *parent = nullptr);
+    explicit MarginArea(InnerEditor *editor, QWidget *parent = nullptr);
 
     void       setMarker   (int line, MarkerType t);
     void       clearMarker (int line, MarkerType t);
@@ -66,7 +68,7 @@ protected:
     void contextMenuEvent (QContextMenuEvent *e) override;
 
 private:
-    QPlainTextEdit          *m_ed;
+    InnerEditor             *m_ed;
     QMap<int, MarkerFlags>   m_markers;   // 1-based line → flags
 
     // Lazy-initialised, painted-from-scratch pixmaps (no asset files needed)
@@ -84,7 +86,7 @@ class LineNumberArea : public QWidget
 {
     Q_OBJECT
 public:
-    explicit LineNumberArea(QPlainTextEdit *editor, QWidget *parent = nullptr);
+    explicit LineNumberArea(InnerEditor *editor, QWidget *parent = nullptr);
 
     int  preferredWidth() const;
     void setCurrentLine(int line) { m_curLine = line; update(); }
@@ -94,8 +96,8 @@ protected:
     void mousePressEvent(QMouseEvent *e) override;   // click = select line
 
 private:
-    QPlainTextEdit *m_ed;
-    int             m_curLine = -1;
+    InnerEditor *m_ed;
+    int          m_curLine = -1;
 
     static constexpr int PAD = 6;   // px padding each side
 };
@@ -115,7 +117,7 @@ public:
         bool folded    = false;
     };
 
-    explicit FoldArea(QPlainTextEdit *editor, QWidget *parent = nullptr);
+    explicit FoldArea(InnerEditor *editor, QWidget *parent = nullptr);
 
     void setRanges (const QList<FoldRange> &ranges);
     void toggle    (int startLine);
@@ -131,7 +133,7 @@ protected:
     void leaveEvent     (QEvent      *e) override;
 
 private:
-    QPlainTextEdit  *m_ed;
+    InnerEditor    *m_ed;
     QList<FoldRange> m_ranges;
     int              m_hovered = -1;
 
@@ -158,7 +160,7 @@ class GutterWidget : public QWidget
 {
     Q_OBJECT
 public:
-    explicit GutterWidget(QPlainTextEdit *editor, QWidget *parent = nullptr);
+    explicit GutterWidget(InnerEditor *editor, QWidget *parent = nullptr);
 
     // Panel accessors
     MarginArea     *margin()     const { return m_margin; }
@@ -189,8 +191,8 @@ signals:
     void foldToggled  (int line, bool folded);
 
 private:
-    QPlainTextEdit *m_ed;
-    MarginArea     *m_margin;
+    InnerEditor *m_ed;
+    MarginArea  *m_margin;
     LineNumberArea *m_lineNum;
     FoldArea       *m_fold;
     QMap<int, GutterIconInfo> m_icons;
