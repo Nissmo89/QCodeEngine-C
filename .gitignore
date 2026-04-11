@@ -2,3 +2,8 @@ CMakeLists.txt.user
 C_CODE_EDIT.pro.user
 build/
 QCodeEditor_BuildInstructions.md
+old_CodeEditor.cpp
+Fix.md
+GutterWidget_fix.zip
+GutterWidget_fix/
+.gitignore

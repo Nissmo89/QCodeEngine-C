@@ -3,91 +3,66 @@
 #include <QTextBlock>
 #include <QPlainTextDocumentLayout>
 #include <tree_sitter/api.h>
-#include <QSet>
 
 bool FoldManager::isFoldable(int blockNumber) const {
     return m_foldRanges.contains(blockNumber);
 }
 
 bool FoldManager::isFolded(int blockNumber) const {
-    for (const auto& f : m_activeFolds) {
-        if (f.start.blockNumber() == blockNumber) return true;
-    }
-    return false;
+    return m_foldedBlocks.contains(blockNumber);
 }
 
 void FoldManager::toggleFold(int blockNumber) {
     if (!isFoldable(blockNumber) || !m_doc) return;
 
-    bool folded = false;
-    int idxToRemove = -1;
-    for (int i = 0; i < m_activeFolds.size(); ++i) {
-        if (m_activeFolds[i].start.blockNumber() == blockNumber) {
-            idxToRemove = i;
-            break;
-        }
+    const bool folded = m_foldedBlocks.contains(blockNumber);
+    if (folded) {
+        m_foldedBlocks.remove(blockNumber);
+    } else {
+        m_foldedBlocks.insert(blockNumber);
     }
 
-    if (idxToRemove >= 0) {
-        // Unfold
-        ActiveFold f = m_activeFolds.takeAt(idxToRemove);
-        applyFolds({qMakePair(f.start.blockNumber(), f.end.blockNumber())}, {});
-        folded = false;
-    } else {
-        // Fold
-        int endBlock = m_foldRanges[blockNumber];
-        ActiveFold f;
-        f.start = QTextCursor(m_doc->findBlockByNumber(blockNumber));
-        f.end = QTextCursor(m_doc->findBlockByNumber(endBlock));
-        m_activeFolds.append(f);
-        applyFolds({}, {qMakePair(blockNumber, endBlock)});
-        folded = true;
-    }
-    emit foldChanged(blockNumber, folded);
+    recomputeVisibility();
+    emit foldChanged(blockNumber, !folded);
 }
 
 int FoldManager::foldEndBlock(int blockNumber) const {
     return m_foldRanges.value(blockNumber, -1);
 }
 
+QMap<int, int> FoldManager::foldRanges() const {
+    return m_foldRanges;
+}
+
 int FoldManager::findFoldContaining(int blockNumber) const {
-    for (const auto& f : m_activeFolds) {
-        int s = f.start.blockNumber();
-        int e = f.end.blockNumber();
-        // blockNumber is *inside* the fold if it is strictly after the start
-        // and at-or-before the end (the end line itself is hidden too).
-        if (blockNumber > s && blockNumber <= e)
-            return s;
+    int result = -1;
+    for (int start : m_foldedBlocks) {
+        int end = m_foldRanges.value(start, -1);
+        if (blockNumber > start && blockNumber <= end) {
+            if (result < 0 || start > result)
+                result = start;
+        }
     }
-    return -1;
+    return result;
 }
 
 void FoldManager::foldAll() {
     if (!m_doc) return;
-    QList<QPair<int, int>> toHide;
     for (auto it = m_foldRanges.begin(); it != m_foldRanges.end(); ++it) {
-        if (!isFolded(it.key())) {
-            ActiveFold f;
-            f.start = QTextCursor(m_doc->findBlockByNumber(it.key()));
-            f.end = QTextCursor(m_doc->findBlockByNumber(it.value()));
-            m_activeFolds.append(f);
-            toHide.append(qMakePair(it.key(), it.value()));
-        }
+        m_foldedBlocks.insert(it.key());
     }
-    applyFolds({}, toHide);
+    recomputeVisibility();
 }
 
 void FoldManager::unfoldAll() {
-    QList<QPair<int, int>> toShow;
-    for (const auto& f : m_activeFolds) {
-        toShow.append(qMakePair(f.start.blockNumber(), f.end.blockNumber()));
-    }
-    m_activeFolds.clear();
-    applyFolds(toShow, {});
+    if (!m_doc) return;
+    m_foldedBlocks.clear();
+    recomputeVisibility();
 }
 
 void FoldManager::updateFoldRanges(void* tree, QTextDocument* doc) {
     if (!doc) return;
+    m_doc = doc;
 
     QMap<int, int> newRanges;
     if (tree) {
@@ -96,38 +71,44 @@ void FoldManager::updateFoldRanges(void* tree, QTextDocument* doc) {
         collectFoldRanges(&root, newRanges);
     }
 
-    QList<QPair<int, int>> toShow;
-    QList<QPair<int, int>> toHide;
-    
-    QList<ActiveFold> keptFolds;
-    for (int i = 0; i < m_activeFolds.size(); ++i) {
-        ActiveFold& f = m_activeFolds[i];
-        int s = f.start.blockNumber();
-        int oldEnd = f.end.blockNumber();
-
-        if (newRanges.contains(s)) {
-            int newEnd = newRanges[s];
-            if (newEnd != oldEnd) {
-                // End moved. Show old range, hide new range.
-                toShow.append(qMakePair(s, oldEnd));
-                toHide.append(qMakePair(s, newEnd));
-                f.end = QTextCursor(doc->findBlockByNumber(newEnd));
-            } else {
-                // Make sure it remains hidden (in case typing temporarily exposed it)
-                toHide.append(qMakePair(s, newEnd));
-            }
-            keptFolds.append(f);
-        } else {
-            // Fold no longer valid syntax
-            toShow.append(qMakePair(s, oldEnd));
+    QSet<int> newFolded;
+    for (int start : m_foldedBlocks) {
+        if (newRanges.contains(start)) {
+            newFolded.insert(start);
         }
     }
-    
-    m_activeFolds = keptFolds;
-    m_foldRanges = newRanges;
 
-    applyFolds(toShow, toHide);
+    m_foldRanges = std::move(newRanges);
+    m_foldedBlocks = std::move(newFolded);
+
+    recomputeVisibility();
     emit foldRangesUpdated();
+}
+
+void FoldManager::recomputeVisibility() {
+    if (!m_doc) return;
+
+    QTextBlock block = m_doc->begin();
+    while (block.isValid()) {
+        const int blockNumber = block.blockNumber();
+        bool visible = true;
+        for (int start : m_foldedBlocks) {
+            const int end = m_foldRanges.value(start, -1);
+            if (blockNumber > start && blockNumber <= end) {
+                visible = false;
+                break;
+            }
+        }
+
+        if (block.isVisible() != visible) {
+            block.setVisible(visible);
+        }
+        block = block.next();
+    }
+
+    m_doc->markContentsDirty(0, m_doc->characterCount());
+    if (auto* layout = qobject_cast<QPlainTextDocumentLayout*>(m_doc->documentLayout()))
+        layout->requestUpdate();
 }
 
 void FoldManager::collectFoldRanges(void* nodeRaw, QMap<int,int>& out) {
@@ -140,7 +121,7 @@ void FoldManager::collectFoldRanges(void* nodeRaw, QMap<int,int>& out) {
     // duplicate fold arrows for K&R-style code where the opening brace lives on
     // its own line (both the parent node and the compound_statement would each
     // register a foldable entry for adjacent lines).
-    static const QSet<QString> FOLDABLE_TYPES = {
+    static const QSet<QString> SIGNATURE_NODES = {
         "function_definition",
         "struct_specifier",
         "union_specifier",
@@ -155,9 +136,16 @@ void FoldManager::collectFoldRanges(void* nodeRaw, QMap<int,int>& out) {
     };
 
     QString nodeType = QString::fromUtf8(ts_node_type(node));
-    if (FOLDABLE_TYPES.contains(nodeType)) {
+    if (SIGNATURE_NODES.contains(nodeType)) {
         int startLine = (int)ts_node_start_point(node).row;
-        int endLine   = (int)ts_node_end_point(node).row;
+        int endLine = (int)ts_node_end_point(node).row;
+        for (uint32_t i = 0; i < ts_node_child_count(node); ++i) {
+            TSNode child = ts_node_child(node, i);
+            if (QString::fromUtf8(ts_node_type(child)) == "compound_statement") {
+                startLine = (int)ts_node_start_point(child).row;
+                break;
+            }
+        }
         if (endLine > startLine) {
             auto existing = out.find(startLine);
             if (existing == out.end() || existing.value() < endLine)
@@ -165,40 +153,9 @@ void FoldManager::collectFoldRanges(void* nodeRaw, QMap<int,int>& out) {
         }
     }
 
-    uint32_t childCount = ts_node_child_count(node);
+    const uint32_t childCount = ts_node_child_count(node);
     for (uint32_t i = 0; i < childCount; ++i) {
         TSNode child = ts_node_child(node, i);
         collectFoldRanges(&child, out);
-    }
-}
-
-void FoldManager::applyFolds(const QList<QPair<int, int>>& toShow, const QList<QPair<int, int>>& toHide) {
-    if (!m_doc) return;
-
-    int dirtyFrom = -1;
-    int dirtyTo = -1;
-
-    auto process = [&](int startBlock, int endBlock, bool hide) {
-        if (startBlock < 0 || endBlock <= startBlock) return;
-        QTextBlock block = m_doc->findBlockByNumber(startBlock + 1);
-        while (block.isValid() && block.blockNumber() <= endBlock) {
-            if (block.isVisible() == hide) {
-                block.setVisible(!hide);
-                int bPos = block.position();
-                int bEnd = bPos + block.length();
-                if (dirtyFrom < 0 || bPos < dirtyFrom) dirtyFrom = bPos;
-                if (bEnd > dirtyTo) dirtyTo = bEnd;
-            }
-            block = block.next();
-        }
-    };
-
-    for (const auto& p : toShow) process(p.first, p.second, false);
-    for (const auto& p : toHide) process(p.first, p.second, true);
-
-    if (dirtyFrom >= 0) {
-        m_doc->markContentsDirty(dirtyFrom, dirtyTo - dirtyFrom);
-        if (auto* layout = qobject_cast<QPlainTextDocumentLayout*>(m_doc->documentLayout()))
-            layout->requestUpdate();
     }
 }

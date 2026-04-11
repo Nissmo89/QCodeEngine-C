@@ -42,6 +42,7 @@ public:
     void updateCurrentLineHighlight();
     void updateLineNumberAreaWidth(int newBlockCount);
     void updateLineNumberArea(const QRect& rect, int dy);
+    void updateGutterFoldRanges();
 
     bool handleKeyPress(QKeyEvent* e);
     void updateBracketMatch();
@@ -50,7 +51,7 @@ public:
 
     CodeEditor* q_ptr;
     InnerEditor* m_editor;
-    GutterWidget* m_gutter;
+    // GutterWidget* m_gutter;
     FoldManager* m_foldManager;
 
     QEditorTheme m_theme;
@@ -70,10 +71,12 @@ public:
     AutoCompleter* m_completer = nullptr;
     // QMiniMap* m_miniMap = nullptr;
     // QSearchBar* m_searchBar = nullptr;
+    GutterWidget *m_gutter = nullptr;
+
+private:
 
 public slots:
     void onCursorPositionChanged();
     void onTextChanged();
-    void onGutterFoldClicked(int blockNumber);
-    void onGutterIconClicked(int blockNumber);
+    void onGutterFoldClicked(int line, bool folded);
 };

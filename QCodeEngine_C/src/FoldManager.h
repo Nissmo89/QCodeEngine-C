@@ -1,8 +1,7 @@
 #pragma once
 #include <QObject>
 #include <QMap>
-#include <QList>
-#include <QTextCursor>
+#include <QSet>
 
 struct TSTree;
 class QTextDocument;
@@ -24,9 +23,10 @@ public:
     void unfoldAll();
 
     int foldEndBlock(int blockNumber) const;
+    QMap<int, int> foldRanges() const;
 
     // Returns the start-block of whichever active fold *contains* blockNumber
-    // (i.e. blockNumber is hidden inside that fold).  Returns -1 if none.
+    // (i.e. blockNumber is hidden inside that fold). Returns -1 if none.
     int findFoldContaining(int blockNumber) const;
 
 signals:
@@ -34,15 +34,10 @@ signals:
     void foldRangesUpdated();
 
 private:
-    void applyFolds(const QList<QPair<int, int>>& toShow, const QList<QPair<int, int>>& toHide);
+    void recomputeVisibility();
     void collectFoldRanges(void* nodeRaw, QMap<int,int>& out);
 
     QMap<int, int> m_foldRanges; // startBlock (0-based) -> endBlock (0-based)
-    
-    struct ActiveFold {
-        QTextCursor start;
-        QTextCursor end;
-    };
-    QList<ActiveFold> m_activeFolds;
+    QSet<int> m_foldedBlocks;
     QTextDocument* m_doc = nullptr;
 };

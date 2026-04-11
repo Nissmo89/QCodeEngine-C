@@ -2,6 +2,7 @@
 #include <QWidget>
 #include "EditorTheme.h"
 #include "EditorTypes.h"
+#include "GutterWidget.h"
 
 class CodeEditorPrivate;
 
