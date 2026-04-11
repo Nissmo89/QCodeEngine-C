@@ -4,9 +4,193 @@
 #include <QFile>
 #include <QTextBlock>
 #include <QPainter>
+#include <QVector>
 #include "TreeSitterQuery_C.h"
 
 extern "C" const TSLanguage *tree_sitter_c(void);
+
+// ── Bracket matching (caret highlights matching delimiter) ───────────────────
+
+namespace {
+
+struct CLexer {
+    enum Phase { Normal, LineComment, BlockComment, String, Char } phase = Normal;
+    bool esc = false;
+
+    // Only "code" (non-string, non-comment) brackets participate in matching.
+    // String/char literals may contain parens that must not pair with delimiters outside.
+    bool codeForBrackets() const {
+        return phase == Normal;
+    }
+
+    void push(const QString& s, int i) {
+        QChar c = s.at(i);
+        switch (phase) {
+        case LineComment:
+            if (c == QLatin1Char('\n') || c == QChar::ParagraphSeparator || c == QChar::LineSeparator)
+                phase = Normal;
+            return;
+        case BlockComment:
+            if (c == QLatin1Char('*') && i + 1 < s.size() && s.at(i + 1) == QLatin1Char('/'))
+                phase = Normal;
+            return;
+        case String:
+            if (esc) {
+                esc = false;
+                return;
+            }
+            if (c == QLatin1Char('\\')) {
+                esc = true;
+                return;
+            }
+            if (c == QLatin1Char('"'))
+                phase = Normal;
+            return;
+        case Char:
+            if (esc) {
+                esc = false;
+                return;
+            }
+            if (c == QLatin1Char('\\')) {
+                esc = true;
+                return;
+            }
+            if (c == QLatin1Char('\''))
+                phase = Normal;
+            return;
+        case Normal:
+            if (c == QLatin1Char('/') && i + 1 < s.size()) {
+                QChar n = s.at(i + 1);
+                if (n == QLatin1Char('/')) {
+                    phase = LineComment;
+                    return;
+                }
+                if (n == QLatin1Char('*')) {
+                    phase = BlockComment;
+                    return;
+                }
+            }
+            if (c == QLatin1Char('"')) {
+                phase = String;
+                esc = false;
+                return;
+            }
+            if (c == QLatin1Char('\'')) {
+                phase = Char;
+                esc = false;
+                return;
+            }
+            return;
+        }
+    }
+};
+
+static void buildBracketCountableMask(const QString& s, QVector<bool>& mask) {
+    const int n = s.size();
+    mask.resize(n);
+    CLexer lx;
+    for (int i = 0; i < n; ++i) {
+        mask[i] = lx.codeForBrackets();
+        lx.push(s, i);
+    }
+}
+
+static bool isBracketChar(QChar c) {
+    return c == QLatin1Char('(') || c == QLatin1Char(')') || c == QLatin1Char('[') || c == QLatin1Char(']')
+        || c == QLatin1Char('{') || c == QLatin1Char('}');
+}
+
+static bool isOpenBracket(QChar c) {
+    return c == QLatin1Char('(') || c == QLatin1Char('[') || c == QLatin1Char('{');
+}
+
+static bool isCloseBracket(QChar c) {
+    return c == QLatin1Char(')') || c == QLatin1Char(']') || c == QLatin1Char('}');
+}
+
+static QChar closingFor(QChar open) {
+    if (open == QLatin1Char('('))
+        return QLatin1Char(')');
+    if (open == QLatin1Char('['))
+        return QLatin1Char(']');
+    if (open == QLatin1Char('{'))
+        return QLatin1Char('}');
+    return QChar();
+}
+
+// Returns partner index or -1 if unbalanced / mismatch.
+static int findClosingPartner(const QString& s, const QVector<bool>& mask, int openPos) {
+    QChar o = s.at(openPos);
+    if (!isOpenBracket(o))
+        return -1;
+    QVector<QChar> stack;
+    stack.push_back(closingFor(o));
+    const int n = s.size();
+    for (int i = openPos + 1; i < n; ++i) {
+        if (!mask.at(i))
+            continue;
+        QChar c = s.at(i);
+        if (isOpenBracket(c)) {
+            stack.push_back(closingFor(c));
+        } else if (isCloseBracket(c)) {
+            if (stack.isEmpty())
+                return -1;
+            if (c != stack.last())
+                return -1;
+            stack.pop_back();
+            if (stack.isEmpty())
+                return i;
+        }
+    }
+    return -1;
+}
+
+static int findOpeningPartner(const QString& s, const QVector<bool>& mask, int closePos) {
+    QChar cl = s.at(closePos);
+    if (!isCloseBracket(cl))
+        return -1;
+    QVector<QChar> stack;
+    stack.push_back(cl);
+    for (int i = closePos - 1; i >= 0; --i) {
+        if (!mask.at(i))
+            continue;
+        QChar c = s.at(i);
+        if (isOpenBracket(c)) {
+            QChar wantClose = closingFor(c);
+            if (stack.isEmpty())
+                return -1;
+            if (wantClose != stack.last())
+                return -1;
+            stack.pop_back();
+            if (stack.isEmpty())
+                return i;
+        } else if (isCloseBracket(c)) {
+            stack.push_back(c);
+        }
+    }
+    return -1;
+}
+
+// Prefer bracket under caret: character after caret, else character before.
+static int bracketIndexAtCursor(const QString& s, int cursorPos) {
+    const int n = s.size();
+    if (n == 0)
+        return -1;
+    // Guard stale or invalid positions (e.g. document shrunk after cursor was sampled).
+    if (cursorPos >= 0 && cursorPos < n) {
+        QChar c = s.at(cursorPos);
+        if (isBracketChar(c))
+            return cursorPos;
+    }
+    if (cursorPos > 0 && cursorPos - 1 < n) {
+        QChar c = s.at(cursorPos - 1);
+        if (isBracketChar(c))
+            return cursorPos - 1;
+    }
+    return -1;
+}
+
+} // namespace
 
 static FormatMap generateFormatMap(const QEditorTheme& theme) {
     FormatMap fmap;
@@ -188,8 +372,55 @@ void CodeEditorPrivate::updateCurrentLineHighlight() {
 
 void CodeEditorPrivate::updateBracketMatch() {
     m_bracketSelections.clear();
-    QTextCursor cursor = m_editor->textCursor();
-    // simplistic right now
+    QTextDocument* doc = m_editor->document();
+    const QString text = doc->toPlainText();
+    const int cursorPos = m_editor->textCursor().position();
+    const int idx = bracketIndexAtCursor(text, cursorPos);
+    if (idx < 0)
+        return;
+
+    QVector<bool> mask;
+    buildBracketCountableMask(text, mask);
+    if (!mask.at(idx))
+        return;
+
+    auto makeSel = [doc, this](int from, int len, bool mismatch) {
+        QTextEdit::ExtraSelection es;
+        QTextCharFormat& f = es.format;
+        if (mismatch) {
+            f.setBackground(m_theme.bracketMismatchBackground);
+            if (!m_theme.bracketMismatchBackground.isValid())
+                f.setBackground(QColor(180, 60, 60, 90));
+        } else {
+            f.setBackground(m_theme.bracketMatchBackground);
+            f.setForeground(m_theme.bracketMatchForeground);
+        }
+        es.cursor = QTextCursor(doc);
+        es.cursor.setPosition(from);
+        es.cursor.setPosition(from + len, QTextCursor::KeepAnchor);
+        return es;
+    };
+
+    const QChar ch = text.at(idx);
+    if (isOpenBracket(ch)) {
+        const int partner = findClosingPartner(text, mask, idx);
+        if (partner < 0) {
+            m_bracketSelections.append(makeSel(idx, 1, true));
+            return;
+        }
+        m_bracketSelections.append(makeSel(idx, 1, false));
+        m_bracketSelections.append(makeSel(partner, 1, false));
+        return;
+    }
+    if (isCloseBracket(ch)) {
+        const int partner = findOpeningPartner(text, mask, idx);
+        if (partner < 0) {
+            m_bracketSelections.append(makeSel(idx, 1, true));
+            return;
+        }
+        m_bracketSelections.append(makeSel(idx, 1, false));
+        m_bracketSelections.append(makeSel(partner, 1, false));
+    }
 }
 
 bool CodeEditorPrivate::handleKeyPress(QKeyEvent* event) {
@@ -423,6 +654,8 @@ void CodeEditor::setTheme(const QEditorTheme& theme) {
     applyEditorStyle(d->m_editor);
     d->updateLineNumberAreaWidth(0);
     d->updateCurrentLineHighlight();
+    if (d->m_completer)
+        d->m_completer->setPopupTheme(theme);
 }
 
 void CodeEditor::setThemeFromFile(const QString& jsonPath) {
@@ -460,6 +693,7 @@ void CodeEditor::setAutoCompleteEnabled(bool enabled) {
         if (!d_ptr->m_completer) {
             d_ptr->m_completer = new AutoCompleter(d_ptr.get());
             d_ptr->m_completer->setEditor(d_ptr->m_editor);
+            d_ptr->m_completer->setPopupTheme(d_ptr->m_theme);
         }
     } else {
         if (d_ptr->m_completer) {
@@ -570,8 +804,15 @@ void CodeEditor::selectAll() {
     d_ptr->m_editor->selectAll();
 }
 
-void CodeEditor::setCustomKeywords(const QStringList& keywords) { }
-void CodeEditor::addCustomKeyword(const QString& keyword) { }
+void CodeEditor::setCustomKeywords(const QStringList& keywords) {
+    if (d_ptr->m_completer)
+        d_ptr->m_completer->setCustomKeywords(keywords);
+}
+
+void CodeEditor::addCustomKeyword(const QString& keyword) {
+    if (d_ptr->m_completer)
+        d_ptr->m_completer->addCustomKeyword(keyword);
+}
 void CodeEditor::setReadOnly(bool readOnly) { d_ptr->m_editor->setReadOnly(readOnly); }
 bool CodeEditor::isReadOnly() const { return d_ptr->m_editor->isReadOnly(); }
 
