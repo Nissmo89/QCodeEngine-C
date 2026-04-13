@@ -1,133 +1,221 @@
+// AutoCompleter.cpp
+//
+// Architecture based on CodeWizard's "suggestionBox" pattern
+// (github.com/AdamJosephMather/CodeWizard), adapted for QCodeEngine-C.
+//
+// Key design decisions (directly from CodeWizard):
+//   • CompletionPopup is a QListWidget child of the editor viewport –
+//     positioned via move(), not a floating top-level window.
+//   • showSuggestions() filters, populates, and selects row 0 all
+//     in one synchronous call — zero timers, zero async events.
+//   • currentSelection is tracked as an int index (CodeWizard: currentSelection)
+//     and reset to 0 on every new filter pass.
+
 #include "AutoCompleter.h"
 #include "CodeEditor/EditorTheme.h"
 
 #include <algorithm>
 
-#include <QAbstractItemView>
+#include <QApplication>
 #include <QKeyEvent>
-#include <QPainter>
-#include <QListView>
 #include <QPlainTextEdit>
-#include <QTextBlock>
 #include <QRegularExpression>
 #include <QScrollBar>
-#include <QStandardItem>
-#include <QStandardItemModel>
-#include <QStyledItemDelegate>
-#include <QStyleOptionViewItem>
+#include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
+#include <QFontMetrics>
+#include <QListWidgetItem>
+#include <QStyleFactory>
+#include <QPainter>
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  CompletionPopup
+// ═════════════════════════════════════════════════════════════════════════════
+
+CompletionPopup::CompletionPopup(QWidget* parent)
+    : QListWidget(parent)
+{
+    // Crucially: no focus steal — the editor keeps keyboard focus at all times
+    setFocusPolicy(Qt::NoFocus);
+    setAttribute(Qt::WA_ShowWithoutActivating, true);
+
+    // Visual polish
+    setFrameShape(QFrame::StyledPanel);
+    setFrameShadow(QFrame::Plain);
+    setLineWidth(1);
+    setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    setSelectionMode(QAbstractItemView::SingleSelection);
+
+    // Default dark theme (overridden by applyTheme)
+    applyTheme(QColor(28, 28, 38), QColor(210, 210, 220),
+               QColor(70, 70, 100),  QColor(55, 85, 160),
+               QColor(255, 255, 255));
+
+    hide();
+
+    connect(this, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
+        if (!item) return;
+        m_selection = row(item);
+        emit completionAccepted(item->text());
+    });
+}
+
+void CompletionPopup::applyTheme(QColor bg, QColor fg, QColor border,
+                                  QColor hlBg, QColor hlFg)
+{
+    // Build a complete stylesheet — same technique CodeWizard uses
+    const QString style = QStringLiteral(
+        "QListWidget {"
+        "  background-color: %1;"
+        "  color: %2;"
+        "  border: 1px solid %3;"
+        "  border-radius: 6px;"
+        "  padding: 3px;"
+        "  outline: none;"
+        "}"
+        "QListWidget::item {"
+        "  padding: 2px 8px;"
+        "  border-radius: 3px;"
+        "}"
+        "QListWidget::item:selected {"
+        "  background-color: %4;"
+        "  color: %5;"
+        "}"
+        "QScrollBar:vertical {"
+        "  width: 6px;"
+        "  background: transparent;"
+        "}"
+        "QScrollBar::handle:vertical {"
+        "  background: %3;"
+        "  border-radius: 3px;"
+        "  min-height: 12px;"
+        "}"
+        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
+        "  height: 0;"
+        "}"
+    )
+    .arg(bg.name(QColor::HexArgb))
+    .arg(fg.name(QColor::HexArgb))
+    .arg(border.name(QColor::HexArgb))
+    .arg(hlBg.name(QColor::HexArgb))
+    .arg(hlFg.name(QColor::HexArgb));
+
+    setStyleSheet(style);
+}
+
+// ── Core: filter + show ───────────────────────────────────────────────────────
+
+void CompletionPopup::showSuggestions(const QList<Entry>& all,
+                                       const QString& prefix,
+                                       const QRect& cursorRect)
+{
+    if (prefix.isEmpty()) {
+        hide();
+        return;
+    }
+
+    // Filter: startsWith(prefix, CaseInsensitive) and not exactly equal
+    m_visible.clear();
+    const QString lp = prefix.toLower();
+    for (const Entry& e : all) {
+        const QString lt = e.text.toLower();
+        if (lt.startsWith(lp) && e.text != prefix)
+            m_visible.append(e.text);
+    }
+
+    if (m_visible.isEmpty()) {
+        hide();
+        return;
+    }
+
+    // (Re)populate the QListWidget synchronously — CodeWizard's fillSuggestions()
+    clear();
+    for (const QString& s : m_visible)
+        addItem(s);
+
+    // Always reset to row 0 — the CodeWizard invariant
+    m_selection = 0;
+    setCurrentRow(m_selection);
+    update();
+
+    // Size: clamp to 10 rows maximum (CodeWizard uses 10)
+    QFontMetrics fm(font());
+    const int rowH  = fm.height() + 6;
+    const int rows  = qMin(m_visible.size(), 10);
+    const int boxW  = 300;
+    const int boxH  = rowH * rows + 8;
+    resize(boxW, boxH);
+
+    reposition(cursorRect);
+    show();
+}
+
+void CompletionPopup::reposition(const QRect& cursorRect)
+{
+    // cursorRect is in viewport coordinates; parent() is the viewport
+    QWidget* par = parentWidget();
+    if (!par) return;
+
+    const QRect parRect = par->rect();
+    int x = cursorRect.left();
+    int y = cursorRect.bottom() + 2;
+
+    // Clamp horizontally
+    if (x + width() > parRect.right())
+        x = parRect.right() - width();
+    x = qMax(0, x);
+
+    // Flip above cursor if too close to bottom
+    if (y + height() > parRect.bottom())
+        y = cursorRect.top() - height() - 2;
+    y = qMax(0, y);
+
+    move(x, y);
+}
+
+void CompletionPopup::stepSelection(int delta)
+{
+    if (m_visible.isEmpty()) return;
+    m_selection = (m_selection + delta + m_visible.size()) % m_visible.size();
+    setCurrentRow(m_selection);
+    scrollToItem(item(m_selection));
+}
+
+QString CompletionPopup::currentCompletion() const
+{
+    if (m_visible.isEmpty()) return {};
+    if (m_selection < 0 || m_selection >= m_visible.size()) return m_visible.first();
+    return m_visible[m_selection];
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+//  Helpers
+// ═════════════════════════════════════════════════════════════════════════════
 
 namespace {
 
-enum Kind : int { DocumentWord = 0, CKeyword = 1, UserKeyword = 2 };
+static const QRegularExpression kIdentRe(
+    QStringLiteral(R"(\b[A-Za-z_][A-Za-z0-9_]*\b)"));
 
-static const int kKindRole = Qt::UserRole + 1;
-
-static const QRegularExpression kIdentRe(QStringLiteral(R"(\b[A-Za-z_][A-Za-z0-9_]*\b)"));
-
-static bool isReservedKeyword(const QString& w, const QStringList& baseKeywords) {
-    for (const QString& k : baseKeywords) {
-        if (k.compare(w, Qt::CaseInsensitive) == 0)
-            return true;
-    }
+static bool isReservedKeyword(const QString& w, const QStringList& kws) {
+    for (const QString& k : kws)
+        if (k.compare(w, Qt::CaseInsensitive) == 0) return true;
     return false;
 }
 
-class CompletionPopupDelegate final : public QStyledItemDelegate {
-public:
-    QColor m_hintKeyword;
-    QColor m_hintWord;
-    QColor m_hintUser;
-
-    CompletionPopupDelegate(QObject* parent = nullptr)
-        : QStyledItemDelegate(parent)
-    {
-        m_hintKeyword = QColor(130, 180, 255);
-        m_hintWord = QColor(150, 200, 150);
-        m_hintUser = QColor(200, 160, 255);
-    }
-
-    void paint(QPainter* painter, const QStyleOptionViewItem& option, const QModelIndex& index) const override {
-        if (!index.isValid())
-            return;
-
-        const QString text = index.data(Qt::DisplayRole).toString();
-        const int kind = index.data(kKindRole).toInt();
-
-        QString hint;
-        QColor hintCol = m_hintWord;
-        switch (kind) {
-        case CKeyword:
-            hint = QStringLiteral("keyword");
-            hintCol = m_hintKeyword;
-            break;
-        case UserKeyword:
-            hint = QStringLiteral("user");
-            hintCol = m_hintUser;
-            break;
-        default:
-            hint = QStringLiteral("in file");
-            hintCol = m_hintWord;
-            break;
-        }
-
-        painter->save();
-        painter->setClipRect(option.rect);
-
-        const bool selected = option.state.testFlag(QStyle::State_Selected);
-        if (selected) {
-            painter->fillRect(option.rect, option.palette.brush(QPalette::Highlight));
-            painter->setPen(option.palette.color(QPalette::HighlightedText));
-        } else {
-            painter->setPen(option.palette.color(QPalette::Text));
-        }
-
-        const QFontMetrics fm(option.font);
-        const int padX = 10;
-        const int rightW = fm.horizontalAdvance(hint) + padX;
-
-        const QRect r = option.rect.adjusted(padX, 0, -padX, 0);
-        const QRect leftRect(r.left(), r.top(), r.width() - rightW, r.height());
-        const QRect rightRect(r.right() - rightW + padX, r.top(), rightW, r.height());
-
-        painter->setFont(option.font);
-        painter->drawText(leftRect, Qt::AlignVCenter | Qt::AlignLeft, text);
-
-        QColor hc = hintCol;
-        if (selected)
-            hc = option.palette.color(QPalette::HighlightedText);
-        hc.setAlpha(selected ? 220 : 180);
-        painter->setPen(hc);
-        painter->drawText(rightRect, Qt::AlignVCenter | Qt::AlignRight, hint);
-
-        painter->restore();
-    }
-
-    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override {
-        Q_UNUSED(index);
-        const QFontMetrics fm(option.font);
-        return QSize(360, fm.height() + 10);
-    }
-};
-
 } // namespace
 
-// ── AutoCompleter ────────────────────────────────────────────────────────────
+// ═════════════════════════════════════════════════════════════════════════════
+//  AutoCompleter
+// ═════════════════════════════════════════════════════════════════════════════
 
 AutoCompleter::AutoCompleter(QObject* parent)
-    : QCompleter(parent)
-    , m_model(new QStandardItemModel(this))
-    , m_delegate(new CompletionPopupDelegate(this))
+    : QObject(parent)
 {
-    setModel(m_model);
-    setCompletionMode(QCompleter::PopupCompletion);
-    setCaseSensitivity(Qt::CaseInsensitive);
-    setFilterMode(Qt::MatchStartsWith);
-    setCompletionColumn(0);
-    setMaxVisibleItems(14);
-
     m_baseKeywords = {
+        // C89 / C99 / C11 / C23 keywords
         "auto", "break", "case", "char", "const", "continue", "default", "do",
         "double", "else", "enum", "extern", "float", "for", "goto", "if",
         "inline", "int", "long", "register", "restrict", "return", "short",
@@ -135,156 +223,161 @@ AutoCompleter::AutoCompleter(QObject* parent)
         "unsigned", "void", "volatile", "while",
         "_Alignas", "_Alignof", "_Atomic", "_Bool", "_Complex", "_Generic",
         "_Noreturn", "_Static_assert", "_Thread_local",
+        // Common macros / identifiers always visible
+        "NULL", "nullptr", "true", "false",
+        "int8_t", "int16_t", "int32_t", "int64_t",
+        "uint8_t", "uint16_t", "uint32_t", "uint64_t",
+        "size_t", "ptrdiff_t", "intptr_t", "uintptr_t",
+        "FILE", "NULL",
     };
 
     m_rebuildTimer.setSingleShot(true);
-    m_rebuildTimer.setInterval(250);
-    connect(&m_rebuildTimer, &QTimer::timeout, this, &AutoCompleter::rebuildDocumentIdentifiers);
-
-    connect(this, QOverload<const QString&>::of(&QCompleter::activated),
-            this, &AutoCompleter::insertCompletion);
-
-    refreshModel();
+    m_rebuildTimer.setInterval(300);
+    connect(&m_rebuildTimer, &QTimer::timeout,
+            this, &AutoCompleter::rebuildDocumentIdentifiers);
 }
 
-AutoCompleter::~AutoCompleter() = default;
+AutoCompleter::~AutoCompleter()
+{
+    // m_popup is a child of the viewport so Qt deletes it automatically
+}
 
-void AutoCompleter::setEditor(QPlainTextEdit* editor) {
+// ── Editor attachment ─────────────────────────────────────────────────────────
+
+void AutoCompleter::setEditor(QPlainTextEdit* editor)
+{
     if (m_editor) {
+        m_editor->viewport()->removeEventFilter(this);
         disconnect(m_editor->document(), nullptr, this, nullptr);
     }
 
     m_editor = editor;
-    setWidget(editor);
+    if (!m_editor) return;
 
-    if (!m_editor)
-        return;
+    // Parent the popup to the viewport so coordinates match cursorRect()
+    m_popup = new CompletionPopup(m_editor->viewport());
+    m_popup->hide();
+    m_popup->setFont(m_editor->font());
+
+    connect(m_popup, &CompletionPopup::completionAccepted,
+            this, &AutoCompleter::onCompletionAccepted);
 
     connect(m_editor->document(), &QTextDocument::contentsChanged, this, [this]() {
         m_rebuildTimer.start();
     });
 
+    applyThemeToPopup();
     rebuildDocumentIdentifiers();
-    ensurePopupChrome();
-    applyPopupChromeFromEditorFallback();
 }
 
-void AutoCompleter::setPopupTheme(const QEditorTheme& theme) {
+// ── Theme ─────────────────────────────────────────────────────────────────────
+
+void AutoCompleter::setPopupTheme(const QEditorTheme& theme)
+{
     m_themeApplied = true;
-
-    m_popupBg = theme.background.lighter(108);
-
-    m_popupFg = theme.foreground;
-    m_popupBorder = theme.gutterBorderColor.isValid() ? theme.gutterBorderColor
-                                                      : theme.foreground.darker(180);
-    m_popupHlBg = theme.selectionBackground;
-    m_popupHlFg = theme.selectionForeground;
-    m_hintKeyword = theme.tokenKeyword;
-    m_hintWord = theme.tokenIdentifier;
-    m_hintUser = theme.tokenPreprocessor.isValid() ? theme.tokenPreprocessor : QColor(200, 160, 255);
-
-    {
-        auto* del = static_cast<CompletionPopupDelegate*>(m_delegate);
-        del->m_hintKeyword = m_hintKeyword;
-        del->m_hintWord = m_hintWord;
-        del->m_hintUser = m_hintUser;
-    }
-
-    ensurePopupChrome();
-    applyPopupChromeFromTheme();
+    m_popupBg    = theme.background.lighter(108);
+    m_popupFg    = theme.foreground;
+    m_popupBorder= theme.gutterBorderColor.isValid()
+                       ? theme.gutterBorderColor
+                       : theme.foreground.darker(200);
+    m_popupHlBg  = theme.selectionBackground;
+    m_popupHlFg  = theme.selectionForeground;
+    applyThemeToPopup();
 }
 
-void AutoCompleter::setCustomKeywords(const QStringList& keywords) {
+void AutoCompleter::applyThemeToPopup()
+{
+    if (!m_popup) return;
+
+    if (!m_themeApplied && m_editor) {
+        const QPalette ep = m_editor->palette();
+        m_popupBg    = ep.color(QPalette::Base).lighter(108);
+        m_popupFg    = ep.color(QPalette::Text);
+        m_popupBorder= ep.color(QPalette::Mid);
+        m_popupHlBg  = ep.color(QPalette::Highlight);
+        m_popupHlFg  = ep.color(QPalette::HighlightedText);
+    }
+
+    m_popup->applyTheme(m_popupBg, m_popupFg, m_popupBorder,
+                        m_popupHlBg, m_popupHlFg);
+    if (m_editor) m_popup->setFont(m_editor->font());
+}
+
+// ── Keyword management ────────────────────────────────────────────────────────
+
+void AutoCompleter::setCustomKeywords(const QStringList& keywords)
+{
     m_customKeywords = keywords;
-    refreshModel();
+    rebuildEntries();
 }
 
-void AutoCompleter::addCustomKeyword(const QString& keyword) {
-    if (keyword.isEmpty())
-        return;
-    for (const QString& k : m_customKeywords) {
-        if (k.compare(keyword, Qt::CaseInsensitive) == 0)
-            return;
-    }
+void AutoCompleter::addCustomKeyword(const QString& keyword)
+{
+    if (keyword.isEmpty()) return;
+    for (const QString& k : m_customKeywords)
+        if (k.compare(keyword, Qt::CaseInsensitive) == 0) return;
     m_customKeywords.append(keyword);
-    refreshModel();
+    rebuildEntries();
 }
 
-void AutoCompleter::refreshModel() {
-    m_model->clear();
+// ── Model building ────────────────────────────────────────────────────────────
 
-    struct Entry {
-        QString text;
-        int kind;
-        int lastIdx;
-    };
-    QVector<Entry> docEntries;
-    docEntries.reserve(m_wordLastIndex.size());
+void AutoCompleter::refreshModel()
+{
+    rebuildEntries();
+}
+
+void AutoCompleter::rebuildEntries()
+{
+    m_entries.clear();
+
+    // 1) Document identifiers sorted by recency (most recently seen first)
+    struct DocEntry { QString text; int lastIdx; };
+    QVector<DocEntry> docVec;
+    docVec.reserve(m_wordLastIndex.size());
 
     for (auto it = m_wordLastIndex.constBegin(); it != m_wordLastIndex.constEnd(); ++it) {
         const QString& w = it.key();
-        if (w.size() < 2)
-            continue;
-        if (isReservedKeyword(w, m_baseKeywords))
-            continue;
+        if (w.size() < 2) continue;
+        if (isReservedKeyword(w, m_baseKeywords)) continue;
         bool customHit = false;
-        for (const QString& c : m_customKeywords) {
-            if (c.compare(w, Qt::CaseInsensitive) == 0) {
-                customHit = true;
-                break;
-            }
-        }
-        if (customHit)
-            continue;
-
-        docEntries.append({w, DocumentWord, it.value()});
+        for (const QString& c : m_customKeywords)
+            if (c.compare(w, Qt::CaseInsensitive) == 0) { customHit = true; break; }
+        if (customHit) continue;
+        docVec.append({w, it.value()});
     }
 
-    std::sort(docEntries.begin(), docEntries.end(), [](const Entry& a, const Entry& b) {
-        if (a.lastIdx != b.lastIdx)
-            return a.lastIdx > b.lastIdx;
-        return QString::compare(a.text, b.text, Qt::CaseInsensitive) < 0;
+    std::sort(docVec.begin(), docVec.end(), [](const DocEntry& a, const DocEntry& b) {
+        if (a.lastIdx != b.lastIdx) return a.lastIdx > b.lastIdx;
+        return a.text.compare(b.text, Qt::CaseInsensitive) < 0;
     });
 
-    for (const Entry& e : docEntries) {
-        auto* item = new QStandardItem(e.text);
-        item->setData(e.kind, kKindRole);
-        m_model->appendRow(item);
-    }
+    using Kind = CompletionPopup::Kind;
+    for (const DocEntry& e : docVec)
+        m_entries.append({e.text, Kind::DocumentWord});
 
+    // 2) C keywords, alphabetically
     QStringList kw = m_baseKeywords;
-    std::sort(kw.begin(), kw.end(), [](const QString& a, const QString& b) {
-        return QString::compare(a, b, Qt::CaseInsensitive) < 0;
-    });
-    for (const QString& k : kw) {
-        auto* item = new QStandardItem(k);
-        item->setData(CKeyword, kKindRole);
-        m_model->appendRow(item);
-    }
+    std::sort(kw.begin(), kw.end(),
+              [](const QString& a, const QString& b){ return a.compare(b, Qt::CaseInsensitive) < 0; });
+    for (const QString& k : kw)
+        m_entries.append({k, Kind::CKeyword});
 
-    QStringList cust = m_customKeywords;
-    std::sort(cust.begin(), cust.end(), [](const QString& a, const QString& b) {
-        return QString::compare(a, b, Qt::CaseInsensitive) < 0;
-    });
-    for (const QString& k : cust) {
+    // 3) User keywords, alphabetically, no dupes with base
+    QStringList ck = m_customKeywords;
+    std::sort(ck.begin(), ck.end(),
+              [](const QString& a, const QString& b){ return a.compare(b, Qt::CaseInsensitive) < 0; });
+    for (const QString& k : ck) {
         bool dup = false;
-        for (const QString& b : m_baseKeywords) {
-            if (b.compare(k, Qt::CaseInsensitive) == 0) {
-                dup = true;
-                break;
-            }
-        }
-        if (dup)
-            continue;
-        auto* item = new QStandardItem(k);
-        item->setData(UserKeyword, kKindRole);
-        m_model->appendRow(item);
+        for (const QString& b : m_baseKeywords)
+            if (b.compare(k, Qt::CaseInsensitive) == 0) { dup = true; break; }
+        if (!dup) m_entries.append({k, Kind::UserKeyword});
     }
 }
 
-void AutoCompleter::rebuildDocumentIdentifiers() {
-    if (!m_editor || !m_editor->document())
-        return;
+void AutoCompleter::rebuildDocumentIdentifiers()
+{
+    if (!m_editor || !m_editor->document()) return;
 
     const QString t = m_editor->toPlainText();
     QHash<QString, int> lastIdx;
@@ -293,166 +386,72 @@ void AutoCompleter::rebuildDocumentIdentifiers() {
         const QRegularExpressionMatch m = it.next();
         lastIdx.insert(m.captured(0), m.capturedStart());
     }
-
     m_wordLastIndex = std::move(lastIdx);
-    refreshModel();
+    rebuildEntries();
 }
 
-QString AutoCompleter::wordPrefixAtCursor() const {
-    if (!m_editor)
-        return {};
+// ── Prefix helper (identical to CodeWizard's getCurrentWord) ──────────────────
 
-    QTextCursor tc = m_editor->textCursor();
-    QString blockText = tc.block().text();
-    int col = tc.positionInBlock();
-    if (col <= 0)
-        return {};
+QString AutoCompleter::wordPrefixAtCursor() const
+{
+    if (!m_editor) return {};
 
-    int start = col;
-    while (start > 0) {
-        const QChar c = blockText.at(start - 1);
-        if (c.isLetterOrNumber() || c == QLatin1Char('_'))
-            --start;
-        else
-            break;
-    }
-    return blockText.mid(start, col - start);
+    QTextCursor tc   = m_editor->textCursor();
+    QTextBlock  bl   = tc.block();
+    const QString bt = bl.text();
+    int blockPos     = tc.position() - bl.position();
+
+    int start = blockPos - 1;
+    while (start >= 0 && (bt[start].isLetterOrNumber() || bt[start] == QLatin1Char('_')))
+        --start;
+
+    return bt.mid(start + 1, blockPos - start - 1);
 }
 
-void AutoCompleter::ensurePopupChrome() {
-    QAbstractItemView* pop = popup();
-    if (!pop)
-        return;
+// ── Insertion (CodeWizard's insertCompletion — strip prefix, then insert) ─────
 
-    pop->setObjectName(QStringLiteral("codeCompleterPopup"));
-    if (auto* lv = qobject_cast<QListView*>(pop))
-        lv->setUniformItemSizes(true);
-    pop->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    pop->setMouseTracking(true);
-    pop->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    pop->setSelectionBehavior(QAbstractItemView::SelectRows);
-    pop->setSelectionMode(QAbstractItemView::SingleSelection);
-    pop->setMinimumWidth(340);
-    pop->setMaximumHeight(280);
-    pop->setItemDelegate(m_delegate);
-
-    if (m_editor)
-        pop->setFont(m_editor->font());
-}
-
-void AutoCompleter::applyPopupChromeFromTheme() {
-    QAbstractItemView* pop = popup();
-    if (!pop)
-        return;
-
-    const QString bg = m_popupBg.name(QColor::HexArgb);
-    const QString fg = m_popupFg.name(QColor::HexArgb);
-    const QString bd = m_popupBorder.name(QColor::HexArgb);
-    const QString hl = m_popupHlBg.name(QColor::HexArgb);
-    const QString hlf = m_popupHlFg.name(QColor::HexArgb);
-
-    pop->setStyleSheet(QStringLiteral(
-        "QAbstractItemView#codeCompleterPopup {"
-        "  background: %1;"
-        "  color: %2;"
-        "  border: 1px solid %3;"
-        "  border-radius: 8px;"
-        "  padding: 4px;"
-        "  outline: none;"
-        "}"
-        "QAbstractItemView#codeCompleterPopup::item {"
-        "  min-height: 24px;"
-        "  border-radius: 4px;"
-        "  padding: 2px 4px;"
-        "}"
-        "QAbstractItemView#codeCompleterPopup::item:selected {"
-        "  background: %4;"
-        "  color: %5;"
-        "}")
-                           .arg(bg, fg, bd, hl, hlf));
-
-    QPalette pal = pop->palette();
-    pal.setColor(QPalette::Base, m_popupBg);
-    pal.setColor(QPalette::Text, m_popupFg);
-    pal.setColor(QPalette::Highlight, m_popupHlBg);
-    pal.setColor(QPalette::HighlightedText, m_popupHlFg);
-    pop->setPalette(pal);
-}
-
-void AutoCompleter::applyPopupChromeFromEditorFallback() {
-    if (!m_editor || m_themeApplied)
-        return;
-    QAbstractItemView* pop = popup();
-    if (!pop)
-        return;
-
-    const QPalette epal = m_editor->palette();
-    m_popupBg = epal.color(QPalette::Base).lighter(108);
-    m_popupFg = epal.color(QPalette::Text);
-    m_popupBorder = epal.color(QPalette::Mid);
-    m_popupHlBg = epal.color(QPalette::Highlight);
-    m_popupHlFg = epal.color(QPalette::HighlightedText);
-    m_hintKeyword = QColor(130, 180, 255);
-    m_hintWord = QColor(160, 200, 160);
-
-    {
-        auto* del = static_cast<CompletionPopupDelegate*>(m_delegate);
-        del->m_hintKeyword = m_hintKeyword;
-        del->m_hintWord = m_hintWord;
-        del->m_hintUser = QColor(200, 160, 255);
-    }
-
-    applyPopupChromeFromTheme();
-}
-
-void AutoCompleter::insertCompletion(const QString& completion) {
-    if (!m_editor || m_editor != widget())
-        return;
+void AutoCompleter::insertCompletion(const QString& completion)
+{
+    if (!m_editor || completion.isEmpty()) return;
 
     const QString prefix = wordPrefixAtCursor();
+    // Insert only the suffix that the user hasn't typed yet
+    const QString suffix = completion.startsWith(prefix, Qt::CaseInsensitive)
+                               ? completion.mid(prefix.size())
+                               : completion;
+
     QTextCursor tc = m_editor->textCursor();
-    const int pos = tc.position();
-
-    int n = prefix.size();
-    if (n > pos)
-        n = pos;
-
-    tc.setPosition(pos - n);
-    tc.setPosition(pos, QTextCursor::KeepAnchor);
-    tc.insertText(completion);
+    tc.insertText(suffix);
     m_editor->setTextCursor(tc);
+
+    if (m_popup) m_popup->hide();
 }
 
-void AutoCompleter::updatePopup() {
-    if (!m_editor)
-        return;
+void AutoCompleter::onCompletionAccepted(const QString& text)
+{
+    insertCompletion(text);
+}
+
+// ── Main entry points ─────────────────────────────────────────────────────────
+
+void AutoCompleter::updatePopup()
+{
+    if (!m_editor || !m_popup) return;
+
+    if (!m_themeApplied) applyThemeToPopup();
+    m_popup->setFont(m_editor->font());
 
     const QString prefix = wordPrefixAtCursor();
-    if (prefix.size() < 1) {
-        popup()->hide();
-        return;
-    }
 
-    ensurePopupChrome();
-    if (!m_themeApplied)
-        applyPopupChromeFromEditorFallback();
-
-    setCompletionPrefix(prefix);
-
-    QAbstractItemView* pop = popup();
-    pop->setCurrentIndex(completionModel()->index(0, 0));
-
-    QRect cr = m_editor->cursorRect();
-    const int scrollW = pop->verticalScrollBar()->isVisible() ? pop->verticalScrollBar()->sizeHint().width() : 0;
-    const int w = qMax(pop->minimumWidth(), pop->sizeHintForColumn(0) + scrollW + 24);
-    cr.setWidth(w);
-    complete(cr);
+    // cursorRect() is already in viewport coordinates
+    m_popup->showSuggestions(m_entries, prefix, m_editor->cursorRect());
 }
 
-bool AutoCompleter::handleKeyPress(QKeyEvent* e) {
-    if (!popup()->isVisible()) {
-        const bool shortcut = e->modifiers().testFlag(Qt::ControlModifier) && e->key() == Qt::Key_Space;
-        if (shortcut) {
+bool AutoCompleter::handleKeyPress(QKeyEvent* e)
+{
+    if (!m_popup || !m_popup->isVisible()) {
+        // Ctrl+Space: force-open popup
+        if (e->modifiers().testFlag(Qt::ControlModifier) && e->key() == Qt::Key_Space) {
             updatePopup();
             return true;
         }
@@ -460,41 +459,51 @@ bool AutoCompleter::handleKeyPress(QKeyEvent* e) {
     }
 
     switch (e->key()) {
-    case Qt::Key_Enter:
-    case Qt::Key_Return:
+
+    // ── Accept ────────────────────────────────────────────────────────────
     case Qt::Key_Tab:
-    case Qt::Key_Backtab: {
-        QString pick = currentCompletion();
-        if (pick.isEmpty()) {
-            const QModelIndex idx = popup()->currentIndex();
-            if (idx.isValid())
-                pick = idx.data(Qt::DisplayRole).toString();
-        }
+    case Qt::Key_Enter:
+    case Qt::Key_Return: {
+        const QString pick = m_popup->currentCompletion();
         if (!pick.isEmpty()) {
             insertCompletion(pick);
-            popup()->hide();
             e->accept();
             return true;
         }
-        popup()->hide();
-        e->ignore();
+        m_popup->hide();
         return false;
-    }
-    case Qt::Key_Escape:
-        popup()->hide();
-        e->accept();
-        return true;
-    case Qt::Key_Up:
-    case Qt::Key_Down:
-    case Qt::Key_PageUp:
-    case Qt::Key_PageDown:
-    case Qt::Key_Home:
-    case Qt::Key_End:
-        e->ignore();
-        return false;
-    default:
-        break;
     }
 
-    return false;
+    // ── Dismiss ───────────────────────────────────────────────────────────
+    case Qt::Key_Escape:
+        m_popup->hide();
+        e->accept();
+        return true;
+
+    // ── Navigation (CodeWizard: J/K for down/up in normal mode; here arrows)
+    case Qt::Key_Down:
+        m_popup->stepSelection(+1);
+        e->accept();
+        return true;
+
+    case Qt::Key_Up:
+        m_popup->stepSelection(-1);
+        e->accept();
+        return true;
+
+    case Qt::Key_PageDown:
+        m_popup->stepSelection(+5);
+        e->accept();
+        return true;
+
+    case Qt::Key_PageUp:
+        m_popup->stepSelection(-5);
+        e->accept();
+        return true;
+
+    default:
+        // Any other key: let the editor handle it; updatePopup() is called
+        // by InnerEditor::keyPressEvent after the base class processes it.
+        return false;
+    }
 }
