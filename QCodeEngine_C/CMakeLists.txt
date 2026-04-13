@@ -14,6 +14,7 @@ add_library(tree-sitter-lib STATIC
 )
 target_include_directories(tree-sitter-lib PUBLIC
     third_party/tree-sitter/lib/include
+    third_party/tree-sitter/lib/src
 )
 set_target_properties(tree-sitter-lib PROPERTIES
     C_STANDARD 11
