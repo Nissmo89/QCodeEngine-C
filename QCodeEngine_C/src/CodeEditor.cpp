@@ -201,19 +201,73 @@ static FormatMap generateFormatMap(const QEditorTheme& theme) {
         if (italic) fmt.setFontItalic(true);
         return fmt;
     };
-    fmap["keyword"]         = makeFormat(theme.tokenKeyword, theme.keywordBold);
-    fmap["variable"]        = makeFormat(theme.tokenIdentifier);
-    fmap["constant"]        = makeFormat(theme.tokenNumber);
-    fmap["number"]          = makeFormat(theme.tokenNumber);
-    fmap["string"]          = makeFormat(theme.tokenString);
-    fmap["comment"]         = makeFormat(theme.tokenComment, false, theme.commentItalic);
-    fmap["function"]        = makeFormat(theme.tokenFunction, theme.functionBold);
-    fmap["function.special"]= makeFormat(theme.tokenPreprocessor);
-    fmap["type"]            = makeFormat(theme.tokenType, theme.typeBold);
-    fmap["property"]        = makeFormat(theme.tokenField);
-    fmap["label"]           = makeFormat(theme.tokenIdentifier);
-    fmap["operator"]        = makeFormat(theme.tokenOperator);
-    fmap["delimiter"]       = makeFormat(theme.tokenOperator);
+
+    // ── Keywords ──────────────────────────────────────────────────────────────
+    // @keyword          — const, enum, extern, inline, sizeof, static, struct, typedef, union, volatile
+    fmap["keyword"]             = makeFormat(theme.tokenKeyword, theme.keywordBold);
+    // @keyword.control  — break, case, continue, default, do, else, for, goto, if, return, switch, while
+    fmap["keyword.control"]     = makeFormat(theme.tokenKeywordControl, theme.keywordBold);
+    // @keyword.preproc  — #define, #elif, #else, #endif, #if, #ifdef, #ifndef, #include, (preproc_directive)
+    fmap["keyword.preproc"]     = makeFormat(theme.tokenKeywordPreproc, theme.keywordBold);
+    // @preproc          — also used for the preproc group (alias in highlights.scm: @keyword.preproc @preproc)
+    fmap["preproc"]             = makeFormat(theme.tokenKeywordPreproc);
+    // @preproc.arg      — the raw token content after #define / #include
+    fmap["preproc.arg"]         = makeFormat(theme.tokenPreprocessor);
+
+    // ── Operators & Punctuation ───────────────────────────────────────────────
+    // @operator         — all arithmetic, logical, comparison, assignment operators
+    fmap["operator"]            = makeFormat(theme.tokenOperator);
+    // @punctuation.delimiter — . ; ,
+    fmap["punctuation.delimiter"] = makeFormat(theme.tokenPunctuation);
+    // @punctuation.bracket   — { } ( ) [ ]
+    fmap["punctuation.bracket"] = makeFormat(theme.tokenPunctuation);
+    // generic parent fallback (resolver walks up dots)
+    fmap["punctuation"]         = makeFormat(theme.tokenPunctuation);
+
+    // ── Literals ─────────────────────────────────────────────────────────────
+    // @string           — string_literal, system_lib_string, char_literal
+    fmap["string"]              = makeFormat(theme.tokenString);
+    // @string.escape    — \n, \t, \x41, … inside string/char literals
+    fmap["string.escape"]       = makeFormat(theme.tokenEscape);
+    // @number           — integer, float, hex, octal literals
+    fmap["number"]              = makeFormat(theme.tokenNumber);
+    // @boolean          — true / false
+    fmap["boolean"]             = makeFormat(theme.tokenBoolean);
+    // @constant.builtin — NULL, nullptr (node type "null")
+    fmap["constant.builtin"]    = makeFormat(theme.tokenConstantBuiltin);
+    // @constant         — ALL_CAPS identifiers matched by regex
+    fmap["constant"]            = makeFormat(theme.tokenConstant);
+
+    // ── Comments ─────────────────────────────────────────────────────────────
+    // @comment          — // and /* */ comments
+    fmap["comment"]             = makeFormat(theme.tokenComment, false, theme.commentItalic);
+
+    // ── Identifiers ──────────────────────────────────────────────────────────
+    // @variable         — plain (identifier) fallback
+    fmap["variable"]            = makeFormat(theme.tokenIdentifier);
+
+    // ── Functions ────────────────────────────────────────────────────────────
+    // @function         — function declarators and call-expression targets
+    fmap["function"]            = makeFormat(theme.tokenFunction, theme.functionBold);
+    // @function.special — preproc_function_def macro names
+    fmap["function.special"]    = makeFormat(theme.tokenKeywordPreproc, theme.functionBold);
+
+    // ── Types ─────────────────────────────────────────────────────────────────
+    // @type             — type_identifier, primitive_type, sized_type_specifier
+    fmap["type"]                = makeFormat(theme.tokenType, theme.typeBold);
+
+    // ── Struct / Record fields ────────────────────────────────────────────────
+    // @property         — field_identifier (struct member access)
+    fmap["property"]            = makeFormat(theme.tokenField);
+
+    // ── Labels ────────────────────────────────────────────────────────────────
+    // @label            — statement_identifier (goto labels)
+    fmap["label"]               = makeFormat(theme.tokenLabel);
+
+    // ── Attributes ───────────────────────────────────────────────────────────
+    // @attribute        — GNU __attribute__((…)) and C23 [[attributes]]
+    fmap["attribute"]           = makeFormat(theme.tokenAttribute);
+
     return fmap;
 }
 
@@ -431,9 +485,11 @@ bool CodeEditorPrivate::handleKeyPress(QKeyEvent* event) {
             QEditorTheme::draculaTheme,
             QEditorTheme::monokaiTheme,
             QEditorTheme::solarizedDarkTheme,
-            QEditorTheme::githubLightTheme
+            QEditorTheme::githubLightTheme ,
+            QEditorTheme::cursorDarkTheme
         };
-        themeIndex = (themeIndex + 1) % 5;
+        size_t themes_size = sizeof(themes) / sizeof(themes[0]);
+        themeIndex = (themeIndex + 1) % themes_size;
         q_ptr->setTheme(themes[themeIndex]());
         return true;
     }
