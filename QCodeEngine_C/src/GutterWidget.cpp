@@ -11,12 +11,14 @@
 #include <QPainterPath>
 #include <QMouseEvent>
 #include <QContextMenuEvent>
+#include <QShowEvent>
 #include <QMenu>
 #include <QAction>
 #include <QFontMetrics>
 #include <QApplication>
 #include <QDebug>
 #include <QHash>
+#include <QTimer>
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Internal helpers  (file-scope, not exposed in header)
@@ -598,13 +600,39 @@ void GutterWidget::connectEditor()
             m_lineNum->setCurrentLine(m_ed->textCursor().blockNumber() + 1);
     });
 
-    // Initial sizing
+    // Initial sizing (synchronous)
     int needed = totalWidth();
     setFixedWidth(needed);
+
+    // Queue a deferred repaint — the editor viewport's first layout pass
+    // happens after the event loop starts, so blockBoundingGeometry() only
+    // returns valid heights then.  Without this the gutter paints all line
+    // numbers at y=0 (height=0) making them invisible until the first edit.
+    QTimer::singleShot(0, this, [this]() {
+        updateWidth();
+        m_margin ->update();
+        m_lineNum->update();
+        m_fold   ->update();
+    });
 }
 
 void GutterWidget::resizeEvent(QResizeEvent *e)
 {
     QWidget::resizeEvent(e);
     relayout();
+}
+
+void GutterWidget::showEvent(QShowEvent *e)
+{
+    QWidget::showEvent(e);
+    // The editor viewport may not have completed its first layout pass yet.
+    // Queue a refresh so blockBoundingGeometry() returns real heights when
+    // the sub-widgets repaint.  This is what makes line numbers visible on
+    // first show without needing to type a character first.
+    QTimer::singleShot(0, this, [this]() {
+        updateWidth();
+        m_margin ->update();
+        m_lineNum->update();
+        m_fold   ->update();
+    });
 }

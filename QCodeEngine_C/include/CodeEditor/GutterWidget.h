@@ -185,6 +185,7 @@ public:
 
 protected:
     void resizeEvent(QResizeEvent *e) override;
+    void showEvent  (QShowEvent   *e) override;
 
 signals:
     void markerToggled(int line, MarkerType type);

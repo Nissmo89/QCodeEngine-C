@@ -5,6 +5,7 @@
 #include <QTextBlock>
 #include <QPainter>
 #include <QVector>
+#include <QTimer>
 #include "TreeSitterQuery_C.h"
 
 extern "C" const TSLanguage *tree_sitter_c(void);
@@ -385,6 +386,15 @@ CodeEditorPrivate::CodeEditorPrivate(CodeEditor* q, QWidget* parent)
 
     applyEditorStyle(m_editor);
     updateLineNumberAreaWidth(0);
+
+    // Ensure the gutter repaints after the editor viewport's first layout
+    // pass. blockBoundingGeometry() returns zero-height rects until Qt's
+    // lazy document layout runs, which happens only after the first
+    // paintEvent of the editor viewport — i.e. after the event loop starts.
+    QTimer::singleShot(0, this, [this]() {
+        m_gutter->updateWidth();
+        m_gutter->update();
+    });
 }
 
 void CodeEditorPrivate::updateLineNumberAreaWidth(int /* newBlockCount */) {
@@ -648,6 +658,14 @@ CodeEditor::~CodeEditor() = default;
 void CodeEditor::setText(const QString& text) {
     d_ptr->m_editor->setPlainText(text);
     applyEditorStyle(d_ptr->m_editor);
+    // New content may have a different line count — refresh gutter immediately
+    // and then once more after the viewport has finished its layout pass.
+    d_ptr->m_gutter->updateWidth();
+    d_ptr->m_gutter->update();
+    QTimer::singleShot(0, this, [this]() {
+        d_ptr->m_gutter->updateWidth();
+        d_ptr->m_gutter->update();
+    });
 }
 
 QString CodeEditor::text() const {
