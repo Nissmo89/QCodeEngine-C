@@ -70,14 +70,39 @@ TreeSitterHighlighter::~TreeSitterHighlighter() {
 
 // Set the highlight query.
 // The return value indicates success, if not successful an empty query is created instead.
-bool TreeSitterHighlighter::set_query(std::string query_string) {
-    ts_query_delete(this->query);
+// bool TreeSitterHighlighter::set_query(std::string query_string) {
+//     ts_query_delete(this->query);
+
+//     uint32_t error_offset;
+//     TSQueryError error_type;
+//     this->query = ts_query_new(this->language, query_string.c_str(), query_string.length(), &error_offset, &error_type);
+//     if (!this->query) {
+//         qDebug() << "The highlight query could not be created due to error" << error_type << " at char " << error_offset << ".";
+//         this->query = ts_query_new(this->language, "", 0, &error_offset, &error_type);
+//         return false;
+//     }
+
+//     generate_format_table();
+//     return true;
+// }
+//
+// Pass by const reference (&) to avoid copying the large query string
+bool TreeSitterHighlighter::set_query(const std::string& query_string) {
+    // Note: ensure this->query is initialized to nullptr in your constructor,
+    // otherwise this first deletion could cause a segfault with garbage memory!
+    if (this->query) {
+        ts_query_delete(this->query);
+        this->query = nullptr;
+    }
 
     uint32_t error_offset;
     TSQueryError error_type;
+
     this->query = ts_query_new(this->language, query_string.c_str(), query_string.length(), &error_offset, &error_type);
+
     if (!this->query) {
         qDebug() << "The highlight query could not be created due to error" << error_type << " at char " << error_offset << ".";
+        // Create an empty fallback query
         this->query = ts_query_new(this->language, "", 0, &error_offset, &error_type);
         return false;
     }
@@ -85,6 +110,7 @@ bool TreeSitterHighlighter::set_query(std::string query_string) {
     generate_format_table();
     return true;
 }
+
 
 // Set the format map.
 void TreeSitterHighlighter::set_format_map(FormatMap format_map) {

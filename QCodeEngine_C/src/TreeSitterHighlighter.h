@@ -55,7 +55,9 @@ class TreeSitterHighlighter: public QObject {
     /// Set the query from a [query pattern string](https://tree-sitter.github.io/tree-sitter/using-parsers#query-syntax) to use for syntax highlighting.
     /// @param query_string A highlighting query string.
     /// @return Indicates if the query could be created successfully.
-    bool set_query(std::string query_string);
+    // bool set_query(std::string query_string);
+    bool set_query(const std::string& query_string);
+
     /// Set the format map.
     /// @param format_map A map of capture names to their desired [QTextCharFormat](https://doc.qt.io/qt-6/qtextcharformat.html) format.
     void set_format_map(FormatMap format_map);
