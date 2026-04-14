@@ -506,13 +506,27 @@ void GutterWidget::updateWidth()
 
 void GutterWidget::setTheme(const QEditorTheme &theme)
 {
-    Q_UNUSED(theme)
     if (!m_ed) return;
-    QPalette pal = m_ed->palette();
-    setPalette(pal);
-    m_margin->setPalette(pal);
-    m_lineNum->setPalette(pal);
-    m_fold->setPalette(pal);
+
+    // Build a palette driven by the theme rather than blindly copying the editor palette.
+    QPalette base = m_ed->palette();
+
+    // Gutter background
+    if (theme.gutterBackground.isValid())
+        base.setColor(QPalette::Window, theme.gutterBackground);
+
+    // Line-number text color
+    if (theme.lineNumberForeground.isValid())
+        base.setColor(QPalette::Text, theme.lineNumberForeground);
+
+    // Highlight the active line number with the cursor-line accent
+    if (theme.gutterActiveLineNumber.isValid())
+        base.setColor(QPalette::Highlight, theme.gutterActiveLineNumber);
+
+    setPalette(base);
+    m_margin ->setPalette(base);
+    m_lineNum->setPalette(base);
+    m_fold   ->setPalette(base);
     update();
 }
 

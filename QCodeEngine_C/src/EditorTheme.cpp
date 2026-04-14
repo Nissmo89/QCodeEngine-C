@@ -134,8 +134,66 @@ QEditorTheme QEditorTheme::draculaTheme() {
 }
 
 QEditorTheme QEditorTheme::monokaiTheme() {
-    QEditorTheme t = draculaTheme(); // Fallback
+    QEditorTheme t;
     t.name = "Monokai";
+    t.background = QColor("#272822");
+    t.foreground = QColor("#F8F8F2");
+    t.selectionBackground = QColor("#49483E");
+    t.selectionForeground = QColor("#F8F8F2");
+    t.currentLineBackground = QColor("#3E3D32");
+    t.lineNumberForeground = QColor("#75715E");
+    t.gutterBackground = QColor("#272822");
+    t.gutterForeground = QColor("#75715E");
+    t.gutterBorderColor = QColor("#272822");
+    t.gutterActiveLineNumber = QColor("#A6E22E");
+    t.bracketMatchBackground = QColor("#49483E");
+    t.bracketMatchForeground = QColor("#F8F8F2");
+    t.bracketMismatchBackground = QColor("#F92672");
+    
+    t.tokenKeyword         = QColor("#F92672");        // @keyword
+    t.tokenKeywordControl  = QColor("#F92672");        // @keyword.control
+    t.tokenKeywordPreproc  = QColor("#F92672");        // @keyword.preproc
+    t.tokenType            = QColor("#66D9EF");        // @type
+    t.tokenString          = QColor("#E6DB74");        // @string
+    t.tokenNumber          = QColor("#AE81FF");        // @number
+    t.tokenComment         = QColor("#75715E");        // @comment
+    t.tokenPreprocessor    = QColor("#F92672");        // @preproc
+    t.tokenFunction        = QColor("#A6E22E");        // @function
+    t.tokenFunctionCall    = QColor("#A6E22E");        // call sites
+    t.tokenIdentifier      = QColor("#F8F8F2");        // @variable
+    t.tokenField           = QColor("#FD971F");        // @property
+    t.tokenEscape          = QColor("#AE81FF");        // @string.escape
+    t.tokenOperator        = QColor("#F92672");        // @operator
+    t.tokenPunctuation     = QColor("#F8F8F2");        // @punctuation.*
+    t.tokenBoolean         = QColor("#AE81FF");        // @boolean
+    t.tokenConstantBuiltin = QColor("#AE81FF");        // @constant.builtin
+    t.tokenConstant        = QColor("#AE81FF");        // @constant
+    t.tokenAttribute       = QColor("#A6E22E");        // @attribute
+    t.tokenLabel           = QColor("#FD971F");        // @label
+    
+    t.searchHighlightBackground = QColor("#E6DB74");
+    t.searchHighlightBackground.setAlpha(64);
+    t.searchHighlightForeground = QColor("#272822");
+    t.searchCurrentMatchBackground = QColor("#E6DB74");
+    t.searchCurrentMatchBackground.setAlpha(128);
+    
+    t.minimapBackground = QColor("#1E1F1C");
+    t.minimapViewportColor = QColor("#49483E");
+    t.minimapViewportColor.setAlpha(128);
+    t.indentGuideColor = QColor("#49483E");
+
+    t.rainbowColors = {
+        QColor("#F92672"), // Pink
+        QColor("#FD971F"), // Orange
+        QColor("#E6DB74"), // Yellow
+        QColor("#A6E22E"), // Green
+        QColor("#66D9EF"), // Blue
+        QColor("#AE81FF")  // Purple
+    };
+
+    t.fontFamily = "JetBrains Mono";
+    t.fontSize   = 14;
+
     return t;
 }
 
@@ -202,14 +260,130 @@ QEditorTheme QEditorTheme::oneDarkTheme() {
 }
 
 QEditorTheme QEditorTheme::solarizedDarkTheme() {
-    QEditorTheme t = draculaTheme(); // Fallback
+    QEditorTheme t;
     t.name = "Solarized Dark";
+    t.background = QColor("#002b36");
+    t.foreground = QColor("#839496");
+    t.selectionBackground = QColor("#073642");
+    t.selectionForeground = QColor("#93a1a1");
+    t.currentLineBackground = QColor("#073642");
+    t.lineNumberForeground = QColor("#586e75");
+    t.gutterBackground = QColor("#002b36");
+    t.gutterForeground = QColor("#586e75");
+    t.gutterBorderColor = QColor("#002b36");
+    t.gutterActiveLineNumber = QColor("#93a1a1");
+    t.bracketMatchBackground = QColor("#073642");
+    t.bracketMatchForeground = QColor("#93a1a1");
+    t.bracketMismatchBackground = QColor("#dc322f");
+    
+    t.tokenKeyword         = QColor("#859900");        // @keyword
+    t.tokenKeywordControl  = QColor("#859900");        // @keyword.control
+    t.tokenKeywordPreproc  = QColor("#cb4b16");        // @keyword.preproc
+    t.tokenType            = QColor("#b58900");        // @type
+    t.tokenString          = QColor("#2aa198");        // @string
+    t.tokenNumber          = QColor("#d33682");        // @number
+    t.tokenComment         = QColor("#586e75");        // @comment
+    t.tokenPreprocessor    = QColor("#cb4b16");        // @preproc
+    t.tokenFunction        = QColor("#268bd2");        // @function
+    t.tokenFunctionCall    = QColor("#268bd2");        // call sites
+    t.tokenIdentifier      = QColor("#839496");        // @variable
+    t.tokenField           = QColor("#268bd2");        // @property
+    t.tokenEscape          = QColor("#dc322f");        // @string.escape
+    t.tokenOperator        = QColor("#859900");        // @operator
+    t.tokenPunctuation     = QColor("#839496");        // @punctuation.*
+    t.tokenBoolean         = QColor("#d33682");        // @boolean
+    t.tokenConstantBuiltin = QColor("#268bd2");        // @constant.builtin
+    t.tokenConstant        = QColor("#2aa198");        // @constant
+    t.tokenAttribute       = QColor("#b58900");        // @attribute
+    t.tokenLabel           = QColor("#268bd2");        // @label
+    
+    t.searchHighlightBackground = QColor("#b58900");
+    t.searchHighlightBackground.setAlpha(64);
+    t.searchHighlightForeground = QColor("#002b36");
+    t.searchCurrentMatchBackground = QColor("#b58900");
+    t.searchCurrentMatchBackground.setAlpha(128);
+    
+    t.minimapBackground = QColor("#00212B");
+    t.minimapViewportColor = QColor("#073642");
+    t.minimapViewportColor.setAlpha(128);
+    t.indentGuideColor = QColor("#073642");
+
+    t.rainbowColors = {
+        QColor("#b58900"), // Yellow
+        QColor("#cb4b16"), // Orange
+        QColor("#dc322f"), // Red
+        QColor("#d33682"), // Magenta
+        QColor("#6c71c4"), // Violet
+        QColor("#268bd2")  // Blue
+    };
+
+    t.fontFamily = "JetBrains Mono";
+    t.fontSize   = 14;
+
     return t;
 }
 
 QEditorTheme QEditorTheme::githubLightTheme() {
-    QEditorTheme t = draculaTheme(); // Fallback
+    QEditorTheme t;
     t.name = "GitHub Light";
+    t.background = QColor("#ffffff");
+    t.foreground = QColor("#24292e");
+    t.selectionBackground = QColor("#c8e1ff");
+    t.selectionForeground = QColor("#24292e");
+    t.currentLineBackground = QColor("#f6f8fa");
+    t.lineNumberForeground = QColor("#1b1f23");
+    t.lineNumberForeground.setAlpha(76); // ~30% alpha
+    t.gutterBackground = QColor("#ffffff");
+    t.gutterForeground = QColor("#1b1f23");
+    t.gutterForeground.setAlpha(76);
+    t.gutterBorderColor = QColor("#eaecef");
+    t.gutterActiveLineNumber = QColor("#24292e");
+    t.bracketMatchBackground = QColor("#c8e1ff");
+    t.bracketMatchForeground = QColor("#24292e");
+    t.bracketMismatchBackground = QColor("#ffdce0");
+    
+    t.tokenKeyword         = QColor("#d73a49");        // @keyword
+    t.tokenKeywordControl  = QColor("#d73a49");        // @keyword.control
+    t.tokenKeywordPreproc  = QColor("#d73a49");        // @keyword.preproc
+    t.tokenType            = QColor("#005cc5");        // @type
+    t.tokenString          = QColor("#032f62");        // @string
+    t.tokenNumber          = QColor("#005cc5");        // @number
+    t.tokenComment         = QColor("#6a737d");        // @comment
+    t.tokenPreprocessor    = QColor("#d73a49");        // @preproc
+    t.tokenFunction        = QColor("#6f42c1");        // @function
+    t.tokenFunctionCall    = QColor("#6f42c1");        // call sites
+    t.tokenIdentifier      = QColor("#24292e");        // @variable
+    t.tokenField           = QColor("#e36209");        // @property
+    t.tokenEscape          = QColor("#22863a");        // @string.escape
+    t.tokenOperator        = QColor("#d73a49");        // @operator
+    t.tokenPunctuation     = QColor("#24292e");        // @punctuation.*
+    t.tokenBoolean         = QColor("#005cc5");        // @boolean
+    t.tokenConstantBuiltin = QColor("#005cc5");        // @constant.builtin
+    t.tokenConstant        = QColor("#005cc5");        // @constant
+    t.tokenAttribute       = QColor("#d73a49");        // @attribute
+    t.tokenLabel           = QColor("#e36209");        // @label
+    
+    t.searchHighlightBackground = QColor("#ffdf5d");
+    t.searchHighlightForeground = QColor("#24292e");
+    t.searchCurrentMatchBackground = QColor("#f9c513");
+    
+    t.minimapBackground = QColor("#fafbfc");
+    t.minimapViewportColor = QColor("#c8e1ff");
+    t.minimapViewportColor.setAlpha(128);
+    t.indentGuideColor = QColor("#eaecef");
+
+    t.rainbowColors = {
+        QColor("#d73a49"), // Red
+        QColor("#e36209"), // Orange
+        QColor("#dbab09"), // Yellow
+        QColor("#28a745"), // Green
+        QColor("#005cc5"), // Blue
+        QColor("#6f42c1")  // Purple
+    };
+
+    t.fontFamily = "JetBrains Mono";
+    t.fontSize   = 14;
+
     return t;
 }
 

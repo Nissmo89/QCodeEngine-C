@@ -286,11 +286,23 @@ void TreeSitterHighlighter::rehighlight_range(BlockRange changed_range) {
     ts_query_cursor_delete(query_cursor);
 
     // Apply rainbow brackets
+    // Pre-accumulate bracket depth from root up to start_block so that any
+    // unclosed brackets above the visible range are counted. Without this,
+    // depth always starts at 0 from start_block and colors shift incorrectly.
     int paren = 0, brace = 0, square = 0;
+    {
+        TSNode root = ts_tree_root_node(this->tree);
+        // Walk the entire tree first to tally all brackets that open before
+        // the first block we will colour.
+        this->accumulate_bracket_depth(root, paren, brace, square, 0, start_block.blockNumber() - 1);
+    }
     this->highlight_rainbow_brackets(ts_tree_root_node(this->tree), paren, brace, square, start_block.blockNumber(), stop_block.blockNumber());
 }
 
 void TreeSitterHighlighter::highlight_rainbow_brackets(TSNode node, int& paren, int& brace, int& square, int start_row, int end_row) {
+    if ((int)ts_node_end_point(node).row < start_row) return;
+    if ((int)ts_node_start_point(node).row > end_row) return;
+
     if (ts_node_child_count(node) == 0) {
         QString type = QString::fromUtf8(ts_node_type(node));
         int depth = -1;
@@ -319,6 +331,33 @@ void TreeSitterHighlighter::highlight_rainbow_brackets(TSNode node, int& paren, 
         uint32_t count = ts_node_child_count(node);
         for (uint32_t i = 0; i < count; ++i) {
             highlight_rainbow_brackets(ts_node_child(node, i), paren, brace, square, start_row, end_row);
+        }
+    }
+}
+
+void TreeSitterHighlighter::accumulate_bracket_depth(TSNode node, int& paren, int& brace, int& square, int start_row, int end_row) {
+    if (end_row < 0) return; // Nothing to accumulate
+    
+    // Stop early if this entire node is after the range we care about
+    if ((int)ts_node_start_point(node).row > end_row) {
+        return;
+    }
+
+    if (ts_node_child_count(node) == 0) {
+        int row = ts_node_start_point(node).row;
+        if (row >= start_row && row <= end_row) {
+            QString type = QString::fromUtf8(ts_node_type(node));
+            if (type == "(") { paren++; }
+            else if (type == ")") { --paren; }
+            else if (type == "{") { brace++; }
+            else if (type == "}") { --brace; }
+            else if (type == "[") { square++; }
+            else if (type == "]") { --square; }
+        }
+    } else {
+        uint32_t count = ts_node_child_count(node);
+        for (uint32_t i = 0; i < count; ++i) {
+            accumulate_bracket_depth(ts_node_child(node, i), paren, brace, square, start_row, end_row);
         }
     }
 }

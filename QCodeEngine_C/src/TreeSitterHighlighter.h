@@ -111,6 +111,8 @@ class TreeSitterHighlighter: public QObject {
     QTextCharFormat get_format_for_capture_name(std::string name);
     // Recursively apply rainbow colors to brackets
     void highlight_rainbow_brackets(TSNode node, int& paren, int& brace, int& square, int start_row, int end_row);
+    // Recursively count brackets up to an end_row without applying colors
+    void accumulate_bracket_depth(TSNode node, int& paren, int& brace, int& square, int start_row, int end_row);
 
   private slots:
     // Notify the syntaxhighlighter of a change in the document at position with charsRemoved characters removed and charsAdded characters added.

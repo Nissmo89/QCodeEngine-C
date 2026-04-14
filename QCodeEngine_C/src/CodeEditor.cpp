@@ -269,6 +269,16 @@ static FormatMap generateFormatMap(const QEditorTheme& theme) {
     // @attribute        — GNU __attribute__((…)) and C23 [[attributes]]
     fmap["attribute"]           = makeFormat(theme.tokenAttribute);
 
+    // ── Catch-all fallback ────────────────────────────────────────────────────
+    // If get_format_for_capture_name exhausts all dot-separated ancestors the
+    // resolver returns format_map[""]. Seeding it here with the editor foreground
+    // prevents invisible text for any capture name that has no mapping.
+    {
+        QTextCharFormat fallback;
+        fallback.setForeground(theme.foreground);
+        fmap[""] = fallback;
+    }
+
     return fmap;
 }
 
@@ -346,7 +356,31 @@ CodeEditorPrivate::CodeEditorPrivate(CodeEditor* q, QWidget* parent)
     layout->addWidget(m_gutter);
     layout->addWidget(m_editor);
 
+    // Hook contentsChange(from,removed,added) — cheaper than contentsChanged:
+    // only touch the blocks that actually changed instead of walking the entire document.
+    connect(m_editor->document(), &QTextDocument::contentsChange,
+            m_editor, [this](int from, int /*charsRemoved*/, int charsAdded) {
+        if (charsAdded <= 0) return;
+        QTextBlock b = m_editor->document()->findBlock(from);
+        QTextBlock end = m_editor->document()->findBlock(from + charsAdded);
+        QTextBlockFormat fmt;
+        fmt.setLineHeight(26, QTextBlockFormat::FixedHeight);
+        QTextCursor cur(m_editor->document());
+        cur.beginEditBlock();
+        while (b.isValid()) {
+            if (b.blockFormat().lineHeightType() != QTextBlockFormat::FixedHeight) {
+                cur.setPosition(b.position());
+                cur.setBlockFormat(fmt);
+            }
+            if (b == end) break;
+            b = b.next();
+        }
+        cur.endEditBlock();
+    });
+
     m_highlighter = new TreeSitterHighlighter(tree_sitter_c(), std::string(HIGHLIGHTS_SCM), generateFormatMap(m_theme), m_editor->document());
+    m_highlighter->set_rainbow_colors(m_theme.rainbowColors);
+    
     connect(m_highlighter, &TreeSitterHighlighter::parsed, this, [this](void* treePtr) {
         m_foldManager->updateFoldRanges(treePtr, m_editor->document());
 
@@ -374,14 +408,18 @@ CodeEditorPrivate::CodeEditorPrivate(CodeEditor* q, QWidget* parent)
     connect(m_editor, &QPlainTextEdit::textChanged, this, &CodeEditorPrivate::onTextChanged);
 
     connect(m_gutter, &GutterWidget::foldToggled, this, &CodeEditorPrivate::onGutterFoldClicked);
-
-    // Hook contentsChange to re-apply line height after each edit (new blocks lose FixedHeight)
-    connect(m_editor->document(), &QTextDocument::contentsChanged, m_editor, [this]() {
-        // Only re-apply if blocks exist without our fixed height
-        QTextBlock b = m_editor->document()->firstBlock();
-        if (b.isValid() && b.blockFormat().lineHeightType() != QTextBlockFormat::FixedHeight) {
-            applyEditorStyle(m_editor);
-        }
+    
+    connect(m_gutter, &GutterWidget::markerToggled, this, [this](int line, MarkerType type) {
+        GutterIconType iconType = GutterIconType::Info;
+        if (type == MarkerType::Error) iconType = GutterIconType::Error;
+        else if (type == MarkerType::Warning) iconType = GutterIconType::Warning;
+        else if (type == MarkerType::Breakpoint) iconType = GutterIconType::Breakpoint;
+        emit q_ptr->gutterIconClicked(line, iconType);
+    });
+    // Also wire QTextDocument::modificationChanged to emit our public signal
+    connect(m_editor->document(), &QTextDocument::modificationChanged,
+            this, [this](bool modified) {
+        emit q_ptr->documentModifiedChanged(modified);
     });
 
     applyEditorStyle(m_editor);
@@ -457,7 +495,6 @@ void CodeEditorPrivate::updateBracketMatch() {
                 f.setBackground(QColor(180, 60, 60, 90));
         } else {
             f.setBackground(m_theme.bracketMatchBackground);
-            f.setForeground(m_theme.bracketMatchForeground);
         }
         es.cursor = QTextCursor(doc);
         es.cursor.setPosition(from);
@@ -466,6 +503,7 @@ void CodeEditorPrivate::updateBracketMatch() {
     };
 
     const QChar ch = text.at(idx);
+
     if (isOpenBracket(ch)) {
         const int partner = findClosingPartner(text, mask, idx);
         if (partner < 0) {
@@ -543,11 +581,28 @@ bool CodeEditorPrivate::handleKeyPress(QKeyEvent* event) {
         static const QMap<QChar, QChar> pairs = {
             {'(', ')'}, {'[', ']'}, {'{', '}'}, {'"', '"'}, {'\'', '\''}
         };
+        // Skip-over: if the user types a closing char that is already the next
+        // character in the document (placed by auto-bracket), just move right.
+        static const QSet<QChar> closers = {')', ']', '}', '"', '\''};
+        if (closers.contains(typed)) {
+            QTextCursor cursor = m_editor->textCursor();
+            if (!cursor.hasSelection()) {
+                QTextBlock blk = cursor.block();
+                int col = cursor.positionInBlock();
+                if (col < blk.length() - 1 && blk.text().at(col) == typed) {
+                    cursor.movePosition(QTextCursor::Right);
+                    m_editor->setTextCursor(cursor);
+                    return true;
+                }
+            }
+        }
 
         if (pairs.contains(typed)) {
             QTextCursor cursor = m_editor->textCursor();
+            cursor.beginEditBlock();
             cursor.insertText(event->text() + pairs[typed]);
             cursor.movePosition(QTextCursor::Left);
+            cursor.endEditBlock();
             m_editor->setTextCursor(cursor);
             return true;
         }
@@ -561,9 +616,11 @@ void CodeEditorPrivate::indentSelection(bool indent) {
     int start = cursor.selectionStart();
     int end   = cursor.selectionEnd();
     
-    cursor.beginEditBlock();
     QTextBlock block = m_editor->document()->findBlock(start);
-    while (block.isValid() && block.position() <= end) {
+    int endBlockNum = m_editor->document()->findBlock(qMax(0, end - (cursor.hasSelection() ? 1 : 0))).blockNumber();
+
+    cursor.beginEditBlock();
+    while (block.isValid() && block.blockNumber() <= endBlockNum) {
         QTextCursor bc(block);
         if (indent) {
             bc.movePosition(QTextCursor::StartOfBlock);
@@ -580,7 +637,6 @@ void CodeEditorPrivate::indentSelection(bool indent) {
             bc.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, toRemove);
             bc.removeSelectedText();
         }
-        if (block.position() + block.length() - 1 >= end) break;
         block = block.next();
     }
     cursor.endEditBlock();
@@ -591,21 +647,29 @@ void CodeEditorPrivate::toggleLineComment() {
     int start = cursor.selectionStart();
     int end   = cursor.selectionEnd();
     
-    cursor.beginEditBlock();
     QTextBlock block = m_editor->document()->findBlock(start);
-    while (block.isValid() && block.position() <= end) {
+    // If we select exactly matching a full block without trailing into the next, avoid overreaching.
+    int endBlockNum = m_editor->document()->findBlock(qMax(0, end - (cursor.hasSelection() ? 1 : 0))).blockNumber();
+
+    cursor.beginEditBlock();
+    while (block.isValid() && block.blockNumber() <= endBlockNum) {
         QTextCursor bc(block);
-        bc.movePosition(QTextCursor::StartOfBlock);
-        QString text = block.text().trimmed();
-        if (text.startsWith("//")) {
-            int pos = block.text().indexOf("//");
+        QString lineText = block.text();
+        QString trimmed = lineText.trimmed();
+        if (trimmed.startsWith("//")) {
+            // Uncommenting: strip // from wherever it appears
+            int pos = lineText.indexOf("//");
             bc.setPosition(block.position() + pos);
             bc.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, 2);
             bc.removeSelectedText();
         } else {
+            // Commenting: advance past leading whitespace, insert // there
+            int indent = 0;
+            while (indent < lineText.size() && (lineText.at(indent) == ' ' || lineText.at(indent) == '\t'))
+                ++indent;
+            bc.setPosition(block.position() + indent);
             bc.insertText("//");
         }
-        if (block.position() + block.length() - 1 >= end) break;
         block = block.next();
     }
     cursor.endEditBlock();
@@ -629,9 +693,21 @@ void CodeEditorPrivate::onCursorPositionChanged() {
     // ─────────────────────────────────────────────────────────────────────
     updateBracketMatch();
     updateCurrentLineHighlight();
-    int blockNum = m_editor->textCursor().blockNumber();
+    QTextCursor cur = m_editor->textCursor();
+    int blockNum = cur.blockNumber();
     m_gutter->setCurrentLine(blockNum + 1);
-    emit q_ptr->cursorPositionChanged(blockNum + 1, m_editor->textCursor().columnNumber() + 1);
+    emit q_ptr->cursorPositionChanged(blockNum + 1, cur.columnNumber() + 1);
+
+    // Emit selectionChanged when a selection exists
+    if (cur.hasSelection()) {
+        QTextCursor start = cur;
+        start.setPosition(cur.selectionStart());
+        QTextCursor end = cur;
+        end.setPosition(cur.selectionEnd());
+        emit q_ptr->selectionChanged(
+            start.blockNumber() + 1, start.columnNumber() + 1,
+            end.blockNumber()   + 1, end.columnNumber()   + 1);
+    }
 }
 
 void CodeEditorPrivate::onTextChanged() {
@@ -658,6 +734,11 @@ CodeEditor::~CodeEditor() = default;
 void CodeEditor::setText(const QString& text) {
     d_ptr->m_editor->setPlainText(text);
     applyEditorStyle(d_ptr->m_editor);
+    
+    if (d_ptr->m_highlighter) {
+        d_ptr->m_highlighter->rehighlight();
+    }
+    
     // New content may have a different line count — refresh gutter immediately
     // and then once more after the viewport has finished its layout pass.
     d_ptr->m_gutter->updateWidth();
@@ -673,7 +754,9 @@ QString CodeEditor::text() const {
 }
 
 void CodeEditor::insertText(const QString& text) {
-    d_ptr->m_editor->textCursor().insertText(text);
+    QTextCursor tc = d_ptr->m_editor->textCursor();
+    tc.insertText(text);
+    d_ptr->m_editor->setTextCursor(tc);
 }
 
 void CodeEditor::clear() {
@@ -722,10 +805,13 @@ void CodeEditor::setTheme(const QEditorTheme& theme) {
     if (d->m_highlighter) {
         d->m_highlighter->set_format_map(generateFormatMap(theme));
         d->m_highlighter->set_rainbow_colors(theme.rainbowColors);
-        d->m_highlighter->rehighlight();
     }
     // Re-apply line height after font change (font metrics affect block layout)
     applyEditorStyle(d->m_editor);
+    
+    if (d->m_highlighter) {
+        d->m_highlighter->rehighlight();
+    }
     d->updateLineNumberAreaWidth(0);
     d->updateCurrentLineHighlight();
     if (d->m_completer)
@@ -847,10 +933,115 @@ void CodeEditor::unfoldAll() {
 
 void CodeEditor::showSearchBar() { }
 void CodeEditor::hideSearchBar() { }
-int CodeEditor::findNext(const QString& term, bool caseSensitive, bool regex) { return 0; }
-int CodeEditor::findPrev(const QString& term, bool caseSensitive, bool regex) { return 0; }
-void CodeEditor::replaceNext(const QString& term, const QString& replacement) { }
-void CodeEditor::replaceAll(const QString& term, const QString& replacement) { }
+
+static void highlightMatches(QTextDocument* doc, const QString& term, bool caseSensitive, bool regex,
+                             QList<QTextEdit::ExtraSelection>& selections, const QEditorTheme& theme) {
+    selections.clear();
+    if (term.isEmpty()) return;
+    QTextDocument::FindFlags flags;
+    if (caseSensitive) flags |= QTextDocument::FindCaseSensitively;
+    
+    QTextCursor cur(doc);
+    while (!cur.isNull() && !cur.atEnd()) {
+        if (regex) {
+            cur = doc->find(QRegularExpression(term, caseSensitive ? QRegularExpression::NoPatternOption : QRegularExpression::CaseInsensitiveOption), cur);
+        } else {
+            cur = doc->find(term, cur, flags);
+        }
+        if (!cur.isNull()) {
+            QTextEdit::ExtraSelection sel;
+            sel.format.setBackground(theme.searchHighlightBackground);
+            sel.format.setForeground(theme.searchHighlightForeground);
+            sel.cursor = cur;
+            selections.append(sel);
+        }
+    }
+}
+
+int CodeEditor::findNext(const QString& term, bool caseSensitive, bool regex) {
+    QTextDocument::FindFlags flags;
+    if (caseSensitive) flags |= QTextDocument::FindCaseSensitively;
+    
+    QTextCursor cur = d_ptr->m_editor->textCursor();
+    QTextCursor match;
+    if (regex) {
+        match = d_ptr->m_editor->document()->find(QRegularExpression(term, caseSensitive ? QRegularExpression::NoPatternOption : QRegularExpression::CaseInsensitiveOption), cur);
+    } else {
+        match = d_ptr->m_editor->document()->find(term, cur, flags);
+    }
+
+    // Wrap around
+    if (match.isNull()) {
+        cur.movePosition(QTextCursor::Start);
+        if (regex) {
+            match = d_ptr->m_editor->document()->find(QRegularExpression(term, caseSensitive ? QRegularExpression::NoPatternOption : QRegularExpression::CaseInsensitiveOption), cur);
+        } else {
+            match = d_ptr->m_editor->document()->find(term, cur, flags);
+        }
+    }
+
+    highlightMatches(d_ptr->m_editor->document(), term, caseSensitive, regex, d_ptr->m_searchSelections, d_ptr->m_theme);
+    d_ptr->updateCurrentLineHighlight();
+
+    if (!match.isNull()) {
+        d_ptr->m_editor->setTextCursor(match);
+        d_ptr->m_editor->centerCursor();
+        return match.selectionStart();
+    }
+    return -1;
+}
+
+int CodeEditor::findPrev(const QString& term, bool caseSensitive, bool regex) {
+    QTextDocument::FindFlags flags = QTextDocument::FindBackward;
+    if (caseSensitive) flags |= QTextDocument::FindCaseSensitively;
+    
+    QTextCursor cur = d_ptr->m_editor->textCursor();
+    QTextCursor match;
+    if (regex) {
+        match = d_ptr->m_editor->document()->find(QRegularExpression(term, caseSensitive ? QRegularExpression::NoPatternOption : QRegularExpression::CaseInsensitiveOption), cur,  QTextDocument::FindBackward);
+    } else {
+        match = d_ptr->m_editor->document()->find(term, cur, flags);
+    }
+
+    // Wrap around
+    if (match.isNull()) {
+        cur.movePosition(QTextCursor::End);
+        if (regex) {
+            match = d_ptr->m_editor->document()->find(QRegularExpression(term, caseSensitive ? QRegularExpression::NoPatternOption : QRegularExpression::CaseInsensitiveOption), cur, QTextDocument::FindBackward);
+        } else {
+            match = d_ptr->m_editor->document()->find(term, cur, flags);
+        }
+    }
+
+    highlightMatches(d_ptr->m_editor->document(), term, caseSensitive, regex, d_ptr->m_searchSelections, d_ptr->m_theme);
+    d_ptr->updateCurrentLineHighlight();
+
+    if (!match.isNull()) {
+        d_ptr->m_editor->setTextCursor(match);
+        d_ptr->m_editor->centerCursor();
+        return match.selectionStart();
+    }
+    return -1;
+}
+
+void CodeEditor::replaceNext(const QString& term, const QString& replacement) {
+    if (d_ptr->m_editor->textCursor().hasSelection() && d_ptr->m_editor->textCursor().selectedText() == term) {
+        d_ptr->m_editor->textCursor().insertText(replacement);
+    }
+    findNext(term, true, false);
+}
+
+void CodeEditor::replaceAll(const QString& term, const QString& replacement) {
+    QTextCursor cur(d_ptr->m_editor->document());
+    cur.beginEditBlock();
+    int count = 0;
+    while (!(cur = d_ptr->m_editor->document()->find(term, cur)).isNull()) {
+        cur.insertText(replacement);
+        count++;
+    }
+    cur.endEditBlock();
+    findNext(term, true, false); // refresh highlights
+}
 
 void CodeEditor::goToLine(int line) {
     QTextDocument* doc = d_ptr->m_editor->document();

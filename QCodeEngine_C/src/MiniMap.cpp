@@ -1,4 +1,4 @@
-#include "QCodeEditor/QCodeEditor.h"
+#include "CodeEditor/CodeEditor.h"
 #include <QWidget>
 
 // Stub implementation for now
