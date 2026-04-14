@@ -34,7 +34,7 @@ The project is structured into two main parts:
 
 ```bash
 # Clone the repository
-git clone <repository_url>
+git clone https://github.com/Nissmo89/QCodeEngine-C.git
 cd QCodeEngine-C
 
 # Create a build directory
