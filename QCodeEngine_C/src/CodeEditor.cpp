@@ -331,8 +331,8 @@ void InnerEditor::paintEvent(QPaintEvent* e) {
                 painter.setPen(d_ptr->m_theme.tokenComment);
                 // Use the full block height so AlignVCenter lands in the middle of the row.
                 painter.drawText(textWidth + 8, (int)top,
-                                 fm.horizontalAdvance(" [...]"), blockH,
-                                 Qt::AlignLeft | Qt::AlignVCenter, " [...]");
+                                 fm.horizontalAdvance(" ...}"), blockH,
+                                 Qt::AlignLeft | Qt::AlignVCenter, " ...}");
                 painter.restore();
             }
         }
@@ -424,6 +424,23 @@ CodeEditorPrivate::CodeEditorPrivate(CodeEditor* q, QWidget* parent)
 
     applyEditorStyle(m_editor);
     updateLineNumberAreaWidth(0);
+
+
+    m_functionPopup = new FloatingListPopup(q);  // Parent is the CodeEditor widget
+        
+    connect(m_functionPopup, &FloatingListPopup::functionSelected,
+            this, &CodeEditorPrivate::onFunctionSelected);
+    
+    // When document changes, update function list
+    connect(m_editor->document(), &QTextDocument::contentsChanged,
+            this, &CodeEditorPrivate::updateFunctionList);
+
+    // In CodeEditor constructor, after m_functionPopup setup
+
+    QAction *showFunctionsAction = new QAction(q);
+    showFunctionsAction->setShortcut(QKeySequence("Ctrl+Shift+O"));  // ✅ Qt 6 compatible
+    connect(showFunctionsAction, &QAction::triggered, q, &CodeEditor::showFunctionList);
+    q->addAction(showFunctionsAction);
 
     // Ensure the gutter repaints after the editor viewport's first layout
     // pass. blockBoundingGeometry() returns zero-height rects until Qt's
@@ -816,6 +833,8 @@ void CodeEditor::setTheme(const QEditorTheme& theme) {
     d->updateCurrentLineHighlight();
     if (d->m_completer)
         d->m_completer->setPopupTheme(theme);
+    if (d->m_functionPopup)
+        d->m_functionPopup->setTheme(theme);
 }
 
 void CodeEditor::setThemeFromFile(const QString& jsonPath) {
@@ -1084,4 +1103,60 @@ bool CodeEditor::isReadOnly() const { return d_ptr->m_editor->isReadOnly(); }
 void CodeEditor::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
     d_ptr->updateLineNumberAreaWidth(0);
+}
+
+// Add to QCodeEngine_C/src/CodeEditor.cpp
+
+void CodeEditorPrivate::updateFunctionList()
+{
+    // Extract functions from current document
+    TreeSitterHelper helper(m_editor->toPlainText());
+    
+    m_functionPopup->clear();
+    
+    // Iterate over functions and populate popup
+    for (const auto &func : helper.functions) {
+        // func.signature contains the function signature
+        // func.startLine contains the line number (0-based)
+        m_functionPopup->addFunction(func.signature, func.startLine + 1);  // +1 for 1-based
+    }
+}
+
+void CodeEditorPrivate::onFunctionSelected(int line)
+{
+    // Jump to selected function
+    q_ptr->goToLine(line);
+    
+    // Emit public signal
+    emit q_ptr->functionSelected(line);
+}
+
+// Add to QCodeEngine_C/src/CodeEditor.cpp
+
+void CodeEditor::showFunctionList()
+{
+    if (d_ptr->m_functionPopup && d_ptr->m_functionPopup->isEmpty()) {
+        d_ptr->updateFunctionList();
+    }
+    
+    if (d_ptr->m_functionPopup) {
+        d_ptr->m_functionPopup->showBelowWidget(this);
+    }
+}
+
+QVector<CodeEditor::FunctionInfo> CodeEditor::getFunctionList() const
+{
+    QVector<FunctionInfo> result;
+    
+    TreeSitterHelper helper(d_ptr->m_editor->toPlainText());
+    
+    for (const auto &func : helper.functions) {
+        FunctionInfo info;
+        info.name = func.signature.split('(').first().trimmed();  // Extract function name
+        info.signature = func.signature;
+        info.lineNumber = func.startLine + 1;  // Convert to 1-based
+        result.append(info);
+    }
+    
+    return result;
 }

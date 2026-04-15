@@ -37,7 +37,12 @@ add_library(QCodeEngine_C
     src/AutoCompleter.h
 #    src/QMiniMap.cpp
 #    src/QSearchBar.cpp
+    src/treesitterhelper.h
+    src/treesitterhelper.cpp
+    src/functionlistpopup.h
 )
+
+
 
 target_include_directories(QCodeEngine_C
     PUBLIC  include/

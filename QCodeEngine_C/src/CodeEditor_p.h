@@ -7,6 +7,7 @@
 #include <QTextBlock>
 #include "TreeSitterHighlighter.h"
 #include "AutoCompleter.h"
+#include "treesitterhelper.h"
 
 // Forward declarations for future stages
 // class QSyntaxHighlighter_TS;
@@ -38,6 +39,8 @@ class CodeEditorPrivate : public QObject {
     Q_OBJECT
 public:
     explicit CodeEditorPrivate(CodeEditor* q, QWidget* parent = nullptr);
+
+  
 
     void updateCurrentLineHighlight();
     void updateLineNumberAreaWidth(int newBlockCount);
@@ -72,6 +75,14 @@ public:
     // QMiniMap* m_miniMap = nullptr;
     // QSearchBar* m_searchBar = nullptr;
     GutterWidget *m_gutter = nullptr;
+
+          // ✅ NEW members
+    FloatingListPopup *m_functionPopup = nullptr;
+    TreeSitterHelper *m_treeSitterHelper = nullptr;
+
+     // ✅ NEW functions
+    void updateFunctionList();
+    void onFunctionSelected(int line);
 
 private:
 

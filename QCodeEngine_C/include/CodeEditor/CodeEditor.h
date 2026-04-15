@@ -3,6 +3,8 @@
 #include "EditorTheme.h"
 #include "EditorTypes.h"
 #include "GutterWidget.h"
+#include "../src/functionlistpopup.h"
+
 
 class CodeEditorPrivate;
 
@@ -77,6 +79,18 @@ public:
     void        setReadOnly(bool readOnly);
     bool        isReadOnly() const;
 
+
+    // ✅ NEW: Show function list popup
+    void showFunctionList();
+    
+    // ✅ NEW: Get list of functions in current document
+    struct FunctionInfo {
+        QString name;
+        QString signature;
+        int lineNumber;
+    };
+    QVector<FunctionInfo> getFunctionList() const;
+
 signals:
     void textChanged();
     void cursorPositionChanged(int line, int column);
@@ -88,10 +102,15 @@ signals:
     void searchMatchCountChanged(int current, int total);
     void documentModifiedChanged(bool modified);
 
+    // ✅ NEW: Emitted when user selects a function from the list
+    void functionSelected(int lineNumber);
+
 protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
     Q_DECLARE_PRIVATE(CodeEditor)
     QScopedPointer<CodeEditorPrivate> d_ptr;
+
+    FloatingListPopup *m_functionPopup = nullptr;  // ← ADD
 };

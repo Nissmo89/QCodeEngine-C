@@ -1,12 +1,24 @@
 #include <QApplication>
 #include <QDebug>
+#include <QMainWindow>
+#include <QMenuBar>
+#include <QMenu>
+#include <QAction>
+#include <QFileDialog>
+#include <QFile>
+#include <QTextStream>
+#include <QMessageBox>
 #include <CodeEditor/CodeEditor.h>
 #include <CodeEditor/EditorTheme.h>
 
 int main(int argc, char* argv[]) {
     QApplication app(argc, argv);
 
-    CodeEditor* editor = new CodeEditor();
+    QMainWindow mainWindow;
+    mainWindow.resize(1000, 720);
+    mainWindow.setWindowTitle("QCodeEditor - One Dark");
+
+    CodeEditor* editor = new CodeEditor(&mainWindow);
 
     // Use One Dark theme (Zed-style)
     editor->setTheme(QEditorTheme::oneDarkTheme());
@@ -18,57 +30,42 @@ int main(int argc, char* argv[]) {
     editor->setTabWidth(4);
     editor->setInsertSpacesOnTab(true);
 
-    // Load a sample C program to demonstrate the editor
-    editor->setText(
-        "#include <stdio.h>\n"
-        "#include <stdlib.h>\n"
-        "#include <string.h>\n"
-        "\n"
-        "#define MAX_SIZE 1024\n"
-        "\n"
-        "typedef struct Node {\n"
-        "    int value;\n"
-        "    struct Node* next;\n"
-        "} Node;\n"
-        "\n"
-        "// Create a new node\n"
-        "Node* create_node(int val) {\n"
-        "    Node* node = (Node*)malloc(sizeof(Node));\n"
-        "    if (!node) return NULL;\n"
-        "    node->value = val;\n"
-        "    node->next  = NULL;\n"
-        "    return node;\n"
-        "}\n"
-        "\n"
-        "/* Insert at head of list */\n"
-        "void push(Node** head, int val) {\n"
-        "    Node* n = create_node(val);\n"
-        "    if (!n) return;\n"
-        "    n->next = *head;\n"
-        "    *head = n;\n"
-        "}\n"
-        "\n"
-        "int sum_list(Node* head) {\n"
-        "    int total = 0;\n"
-        "    for (Node* cur = head; cur != NULL; cur = cur->next) {\n"
-        "        total += cur->value;\n"
-        "    }\n"
-        "    return total;\n"
-        "}\n"
-        "\n"
-        "int main(void) {\n"
-        "    Node* list = NULL;\n"
-        "    for (int i = 0; i < 10; i++) {\n"
-        "        push(&list, i * i);\n"
-        "    }\n"
-        "    printf(\"Sum = %d\\n\", sum_list(list));\n"
-        "    return 0;\n"
-        "}\n"
-    );
+    mainWindow.setCentralWidget(editor);
 
-    editor->resize(1000, 720);
-    editor->setWindowTitle("QCodeEditor - One Dark");
-    editor->show();
+    QMenuBar* menuBar = mainWindow.menuBar();
+    QMenu* fileMenu = menuBar->addMenu("&File");
+    QAction* openAction = fileMenu->addAction("&Open...");
+    openAction->setShortcut(QKeySequence::Open);
+
+    QObject::connect(openAction, &QAction::triggered, [&mainWindow, editor]() {
+        QString fileName = QFileDialog::getOpenFileName(&mainWindow, "Open File", "", "All Files (*)");
+        if (!fileName.isEmpty()) {
+            QFile file(fileName);
+            if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                QTextStream in(&file);
+                editor->setText(in.readAll());
+                file.close();
+            } else {
+                QMessageBox::warning(&mainWindow, "Error", "Could not open file.");
+            }
+        }
+    });
+
+    // ✅ FIXED: Show function list
+    editor->showFunctionList();
+
+    // ✅ FIXED: Get function list programmatically
+    auto functions = editor->getFunctionList();
+    for (const auto &func : functions) {
+        qDebug() << func.name << "at line" << func.lineNumber;
+    }
+
+    // ✅ FIXED: Connect to function selection - Use QObject:: scope or change & to *
+    QObject::connect(editor, &CodeEditor::functionSelected, [](int line) {
+        qDebug() << "Jumped to line" << line;
+    });
+
+    mainWindow.show();
 
     return app.exec();
 }

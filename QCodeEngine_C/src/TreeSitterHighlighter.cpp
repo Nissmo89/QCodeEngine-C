@@ -285,6 +285,68 @@ void TreeSitterHighlighter::rehighlight_range(BlockRange changed_range) {
 
     ts_query_cursor_delete(query_cursor);
 
+    // --- Injections for C Preprocessor Macros ---
+    // This allows nested AST parsing (e.g. coloring `for` loops inside `#define FOREACH(...) ...`)
+    static TSQuery* inj_query = nullptr;
+    if (!inj_query) {
+        uint32_t err_offset;
+        TSQueryError err_type;
+        const char* inj_scm = "(preproc_def value: (preproc_arg) @inj) (preproc_function_def value: (preproc_arg) @inj)";
+        inj_query = ts_query_new(this->language, inj_scm, strlen(inj_scm), &err_offset, &err_type);
+    }
+    
+    if (inj_query) {
+        TSQueryCursor* cur = ts_query_cursor_new();
+        ts_query_cursor_set_byte_range(cur, start_block.position() * 2, (stop_block.position() + stop_block.length()) * 2);
+        ts_query_cursor_exec(cur, inj_query, ts_tree_root_node(this->tree));
+        
+        TSQueryMatch m;
+        uint32_t c_idx;
+        QString s = this->document->toPlainText();
+        while (ts_query_cursor_next_capture(cur, &m, &c_idx)) {
+            TSQueryCapture cap = m.captures[c_idx];
+            
+            TSRange range;
+            range.start_point = ts_node_start_point(cap.node);
+            range.end_point = ts_node_end_point(cap.node);
+            range.start_byte = ts_node_start_byte(cap.node);
+            range.end_byte = ts_node_end_byte(cap.node);
+            
+            ts_parser_set_included_ranges(this->parser, &range, 1);
+            TSTree* inj_tree = ts_parser_parse_string_encoding(this->parser, NULL, (char*)s.utf16(), s.length() * 2, TSInputEncodingUTF16LE);
+            ts_parser_set_included_ranges(this->parser, NULL, 0); // Reset immediately
+            
+            if (inj_tree) {
+                TSQueryCursor* inner_cur = ts_query_cursor_new();
+                ts_query_cursor_exec(inner_cur, this->query, ts_tree_root_node(inj_tree));
+                
+                TSQueryMatch inner_m;
+                uint32_t inner_c_idx;
+                while (ts_query_cursor_next_capture(inner_cur, &inner_m, &inner_c_idx)) {
+                    TSQueryCapture inner_cap = inner_m.captures[inner_c_idx];
+                    QTextCharFormat fmt = this->format_lookup_table[inner_cap.index];
+                    
+                    if (ts_node_start_point(inner_cap.node).row == ts_node_end_point(inner_cap.node).row) {
+                        QTextBlock block = this->document->findBlockByNumber(ts_node_start_point(inner_cap.node).row);
+                        this->apply_format(fmt, block, ts_node_start_point(inner_cap.node).column / 2, ts_node_end_point(inner_cap.node).column / 2);
+                    } else if (ts_node_start_point(inner_cap.node).row < ts_node_end_point(inner_cap.node).row) {
+                        QTextBlock block = this->document->findBlockByNumber(ts_node_start_point(inner_cap.node).row);
+                        this->apply_format(fmt, block, ts_node_start_point(inner_cap.node).column / 2, block.length());
+                        block = block.next();
+                        while (block.isValid() && block.blockNumber() < ts_node_end_point(inner_cap.node).row) {
+                            this->apply_format(fmt, block, 0, block.length());
+                            block = block.next();
+                        }
+                        this->apply_format(fmt, block, 0, ts_node_end_point(inner_cap.node).column / 2);
+                    }
+                }
+                ts_query_cursor_delete(inner_cur);
+                ts_tree_delete(inj_tree);
+            }
+        }
+        ts_query_cursor_delete(cur);
+    }
+
     // Apply rainbow brackets
     // Pre-accumulate bracket depth from root up to start_block so that any
     // unclosed brackets above the visible range are counted. Without this,
