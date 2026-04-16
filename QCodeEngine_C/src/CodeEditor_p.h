@@ -1,6 +1,7 @@
 #pragma once
 #include <QPlainTextEdit>
 #include <QMap>
+#include <QTimer>
 #include "CodeEditor/CodeEditor.h"
 #include "CodeEditor/GutterWidget.h"
 #include "FoldManager.h"
@@ -45,7 +46,8 @@ public:
     void updateCurrentLineHighlight();
     void updateLineNumberAreaWidth(int newBlockCount);
     void updateLineNumberArea(const QRect& rect, int dy);
-    void updateGutterFoldRanges();
+    void applyFolds();
+    void setFoldingEnabled(bool enabled);
 
     bool handleKeyPress(QKeyEvent* e);
     void updateBracketMatch();
@@ -65,6 +67,10 @@ public:
     int m_tabWidth = 4;
     bool m_autoBracket = true;
     bool m_autoIndent = true;
+    bool m_foldingEnabled = false;
+    bool m_applyingFolds = false;
+
+    QTimer* m_reparseTimer = nullptr;
 
     QList<QTextEdit::ExtraSelection> m_bracketSelections;
     QList<QTextEdit::ExtraSelection> m_searchSelections;

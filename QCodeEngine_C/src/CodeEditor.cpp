@@ -321,7 +321,8 @@ void InnerEditor::paintEvent(QPaintEvent* e) {
 
     while (block.isValid() && top <= e->rect().bottom()) {
         if (block.isVisible() && bottom >= e->rect().top()) {
-            if (d_ptr->m_foldManager->isFolded(blockNumber)) {
+            const FoldRange* fr = d_ptr->m_foldManager->foldAt(blockNumber);
+            if (fr && fr->collapsed) {
                 QString text = block.text();
                 QFontMetrics fm(font());
                 int textWidth = fm.horizontalAdvance(text.replace('\t', QString(d_ptr->m_tabWidth, ' ')));
@@ -331,8 +332,8 @@ void InnerEditor::paintEvent(QPaintEvent* e) {
                 painter.setPen(d_ptr->m_theme.tokenComment);
                 // Use the full block height so AlignVCenter lands in the middle of the row.
                 painter.drawText(textWidth + 8, (int)top,
-                                 fm.horizontalAdvance(" ...}"), blockH,
-                                 Qt::AlignLeft | Qt::AlignVCenter, " ...}");
+                                 fm.horizontalAdvance(" ... "), blockH,
+                                 Qt::AlignLeft | Qt::AlignVCenter, " ... ");
                 painter.restore();
             }
         }
@@ -348,7 +349,6 @@ CodeEditorPrivate::CodeEditorPrivate(CodeEditor* q, QWidget* parent)
 {
     m_gutter = new GutterWidget(m_editor, q);
     m_foldManager = new FoldManager(this);
-    m_foldManager->setDocument(m_editor->document());
 
     QHBoxLayout* layout = new QHBoxLayout(q);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -381,21 +381,21 @@ CodeEditorPrivate::CodeEditorPrivate(CodeEditor* q, QWidget* parent)
     m_highlighter = new TreeSitterHighlighter(tree_sitter_c(), std::string(HIGHLIGHTS_SCM), generateFormatMap(m_theme), m_editor->document());
     m_highlighter->set_rainbow_colors(m_theme.rainbowColors);
     
-    connect(m_highlighter, &TreeSitterHighlighter::parsed, this, [this](void* treePtr) {
-        m_foldManager->updateFoldRanges(treePtr, m_editor->document());
+    connect(m_highlighter, &TreeSitterHighlighter::parsed, this, [this](void* /*treePtr*/) {
+        // Highlighting only — fold manager drives itself via the debounce timer
+    });
 
-        QMap<int, int> foldRanges = m_foldManager->foldRanges();
-        QList<FoldArea::FoldRange> ranges;
-        for (auto it = foldRanges.begin(); it != foldRanges.end(); ++it) {
-            ranges.append({it.key() + 1, it.value() + 1, m_foldManager->isFolded(it.key())});
-        }
-        m_gutter->setFoldRanges(ranges);
-        m_gutter->update();
+    m_reparseTimer = new QTimer(this);
+    m_reparseTimer->setSingleShot(true);
+    m_reparseTimer->setInterval(150);
+
+    connect(m_editor, &QPlainTextEdit::textChanged, this, [this]() {
+        if (m_foldingEnabled) m_reparseTimer->start();
     });
-    // After fold ranges rebuilt, refresh the gutter so fold arrows appear correctly
-    connect(m_foldManager, &FoldManager::foldRangesUpdated, m_gutter, [this]() {
-        m_gutter->update();
+    connect(m_reparseTimer, &QTimer::timeout, this, [this]() {
+        m_foldManager->reparse(m_editor->toPlainText());
     });
+    connect(m_foldManager, &FoldManager::foldsChanged, this, &CodeEditorPrivate::applyFolds);
 
     m_completer = new AutoCompleter(this);
     m_completer->setEditor(m_editor);
@@ -463,13 +463,60 @@ void CodeEditorPrivate::updateLineNumberArea(const QRect& rect, int dy) {
     }
 }
 
-void CodeEditorPrivate::updateGutterFoldRanges() {
-    QMap<int, int> foldRanges = m_foldManager->foldRanges();
-    QList<FoldArea::FoldRange> ranges;
-    for (auto it = foldRanges.begin(); it != foldRanges.end(); ++it) {
-        ranges.append({it.key() + 1, it.value() + 1, m_foldManager->isFolded(it.key())});
+void CodeEditorPrivate::applyFolds()
+{
+    if (m_applyingFolds) return;
+    m_applyingFolds = true;
+    if (!m_foldingEnabled) { m_applyingFolds = false; return; }
+
+    QTextDocument* doc = m_editor->document();
+    QTextBlock block = doc->begin();
+    while (block.isValid()) {
+        bool hidden = m_foldManager->isLineHidden(block.blockNumber());
+        if (block.isVisible() == hidden) {
+            block.setVisible(!hidden);
+            block.setLineCount(hidden ? 0 : 1);
+        }
+        block = block.next();
     }
-    m_gutter->setFoldRanges(ranges);
+    doc->markContentsDirty(0, doc->characterCount());
+    m_editor->viewport()->update();
+
+    // Convert to FoldArea ranges (0-based → 1-based)
+    QList<FoldArea::FoldRange> gutterRanges;
+    for (const FoldRange& fr : m_foldManager->ranges()) {
+        gutterRanges.append({static_cast<int>(fr.startRow) + 1,
+                             static_cast<int>(fr.endRow) + 1,
+                             fr.collapsed});
+    }
+    m_gutter->setFoldRanges(gutterRanges);
+    m_gutter->update();
+
+    m_applyingFolds = false;
+}
+
+void CodeEditorPrivate::setFoldingEnabled(bool enabled)
+{
+    m_foldingEnabled = enabled;
+    if (enabled) {
+        // Trigger immediate reparse if there's content
+        QString content = m_editor->toPlainText();
+        if (!content.isEmpty()) {
+            m_foldManager->reparse(content);
+        }
+    } else {
+        QTextDocument* doc = m_editor->document();
+        QTextBlock block = doc->begin();
+        while (block.isValid()) {
+            if (!block.isVisible()) {
+                block.setVisible(true);
+                block.setLineCount(1);
+            }
+            block = block.next();
+        }
+        doc->markContentsDirty(0, doc->characterCount());
+        m_editor->viewport()->update();
+    }
 }
 
 void CodeEditorPrivate::updateCurrentLineHighlight() {
@@ -700,10 +747,13 @@ void CodeEditorPrivate::onCursorPositionChanged() {
     {
         QTextBlock curBlock = m_editor->textCursor().block();
         if (!curBlock.isVisible()) {
-            int foldStart = m_foldManager->findFoldContaining(curBlock.blockNumber());
-            if (foldStart >= 0) {
-                m_foldManager->toggleFold(foldStart);
-                m_gutter->update();
+            int line = curBlock.blockNumber();
+            for (const auto& fr : m_foldManager->ranges()) {
+                if (fr.collapsed && line > static_cast<int>(fr.startRow) && line <= static_cast<int>(fr.endRow)) {
+                    m_foldManager->toggleFold(static_cast<int>(fr.startRow));
+                    applyFolds();
+                    break;
+                }
             }
         }
     }
@@ -731,10 +781,10 @@ void CodeEditorPrivate::onTextChanged() {
     emit q_ptr->textChanged();
 }
 
-void CodeEditorPrivate::onGutterFoldClicked(int line, bool /*folded*/) {
-    m_foldManager->toggleFold(qMax(0, line - 1));
-    updateGutterFoldRanges();
-    m_gutter->update();
+void CodeEditorPrivate::onGutterFoldClicked(int line, bool /*folded*/)
+{
+    m_foldManager->toggleFold(line - 1);  // convert 1-based to 0-based
+    // applyFolds() is triggered automatically via foldsChanged signal
 }
 
 
@@ -754,6 +804,11 @@ void CodeEditor::setText(const QString& text) {
     
     if (d_ptr->m_highlighter) {
         d_ptr->m_highlighter->rehighlight();
+    }
+    
+    // Trigger fold reparse if folding is enabled
+    if (d_ptr->m_foldingEnabled && !text.isEmpty()) {
+        d_ptr->m_foldManager->reparse(text);
     }
     
     // New content may have a different line count — refresh gutter immediately
@@ -865,6 +920,7 @@ void CodeEditor::setMiniMapVisible(bool visible) {
 void CodeEditor::setFoldingEnabled(bool enabled) {
     d_ptr->m_gutter->setFoldingVisible(enabled);
     d_ptr->updateLineNumberAreaWidth(0);
+    d_ptr->setFoldingEnabled(enabled);
 }
 
 void CodeEditor::setAutoCompleteEnabled(bool enabled) {
@@ -930,24 +986,30 @@ void CodeEditor::clearGutterIcons() {
 }
 
 void CodeEditor::foldLine(int line) {
-    if (!d_ptr->m_foldManager->isFolded(line - 1)) {
+    const FoldRange* fr = d_ptr->m_foldManager->foldAt(line - 1);
+    if (fr && !fr->collapsed) {
         d_ptr->m_foldManager->toggleFold(line - 1);
-        d_ptr->updateGutterFoldRanges();
     }
 }
 void CodeEditor::unfoldLine(int line) {
-    if (d_ptr->m_foldManager->isFolded(line - 1)) {
+    const FoldRange* fr = d_ptr->m_foldManager->foldAt(line - 1);
+    if (fr && fr->collapsed) {
         d_ptr->m_foldManager->toggleFold(line - 1);
-        d_ptr->updateGutterFoldRanges();
     }
 }
 void CodeEditor::foldAll() {
-    d_ptr->m_foldManager->foldAll();
-    d_ptr->updateGutterFoldRanges();
+    for (const FoldRange& fr : d_ptr->m_foldManager->ranges()) {
+        if (!fr.collapsed) {
+            d_ptr->m_foldManager->toggleFold(static_cast<int>(fr.startRow));
+        }
+    }
 }
 void CodeEditor::unfoldAll() {
-    d_ptr->m_foldManager->unfoldAll();
-    d_ptr->updateGutterFoldRanges();
+    for (const FoldRange& fr : d_ptr->m_foldManager->ranges()) {
+        if (fr.collapsed) {
+            d_ptr->m_foldManager->toggleFold(static_cast<int>(fr.startRow));
+        }
+    }
 }
 
 void CodeEditor::showSearchBar() { }

@@ -1,43 +1,35 @@
 #pragma once
-#include <QObject>
-#include <QMap>
-#include <QSet>
 
-struct TSTree;
-class QTextDocument;
+#include <memory>
+#include <vector>
+#include <QObject>
+#include <QString>
+#include <tree_sitter/api.h>
+#include "CodeEditor/FoldQuery.h"
 
 class FoldManager : public QObject {
     Q_OBJECT
 public:
-    explicit FoldManager(QObject* parent = nullptr) : QObject(parent) {}
+    explicit FoldManager(QObject* parent = nullptr);
+    ~FoldManager() override;
 
-    // Called by highlighter after each parse with the new tree pointer.
-    void updateFoldRanges(void* tree, QTextDocument* doc);
+    FoldManager(const FoldManager&) = delete;
+    FoldManager& operator=(const FoldManager&) = delete;
 
-    void setDocument(QTextDocument* doc) { m_doc = doc; }
+    void reparse(const QString& source);
 
-    bool isFoldable(int blockNumber) const;
-    bool isFolded(int blockNumber) const;
-    void toggleFold(int blockNumber);
-    void foldAll();
-    void unfoldAll();
-
-    int foldEndBlock(int blockNumber) const;
-    QMap<int, int> foldRanges() const;
-
-    // Returns the start-block of whichever active fold *contains* blockNumber
-    // (i.e. blockNumber is hidden inside that fold). Returns -1 if none.
-    int findFoldContaining(int blockNumber) const;
+    bool             hasFoldAt(int line) const;
+    bool             isLineHidden(int line) const;
+    void             toggleFold(int line);
+    const FoldRange* foldAt(int line) const;
+    const std::vector<FoldRange>& ranges() const;
 
 signals:
-    void foldChanged(int blockNumber, bool folded);
-    void foldRangesUpdated();
+    void foldsChanged();
 
 private:
-    void recomputeVisibility();
-    void collectFoldRanges(void* nodeRaw, QMap<int,int>& out);
-
-    QMap<int, int> m_foldRanges; // startBlock (0-based) -> endBlock (0-based)
-    QSet<int> m_foldedBlocks;
-    QTextDocument* m_doc = nullptr;
+    TSParser*                  m_parser = nullptr;
+    TSTree*                    m_tree   = nullptr;
+    std::unique_ptr<FoldQuery> m_query;
+    std::vector<FoldRange>     m_ranges;
 };
