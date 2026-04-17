@@ -4,7 +4,6 @@ project(QCodeEngine_C VERSION 1.0.0 LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
-set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
 
@@ -28,7 +27,6 @@ add_library(QCodeEngine_C
     src/GutterWidget.cpp
     src/EditorTheme.cpp
     src/FoldManager.cpp
-    src/FoldQuery.cpp
     src/TreeSitterHighlighter.cpp
     include/CodeEditor/CodeEditor.h
     include/CodeEditor/GutterWidget.h
@@ -42,7 +40,6 @@ add_library(QCodeEngine_C
     src/treesitterhelper.h
     src/treesitterhelper.cpp
     src/functionlistpopup.h
-    resources/queries.qrc
 )
 
 
@@ -66,5 +63,4 @@ endif()
 # ── Install ──────────────────────────────────────────────────
 install(TARGETS QCodeEngine_C LIBRARY DESTINATION lib)
 install(DIRECTORY include/ DESTINATION include)
-install(FILES include/CodeEditor/FoldQuery.h DESTINATION include/CodeEditor)
 install(DIRECTORY themes/  DESTINATION share/QCodeEngine_C/themes)

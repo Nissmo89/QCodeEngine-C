@@ -1,35 +1,43 @@
 #pragma once
-
-#include <memory>
-#include <vector>
 #include <QObject>
-#include <QString>
-#include <tree_sitter/api.h>
-#include "CodeEditor/FoldQuery.h"
+#include <QMap>
+#include <QSet>
+
+struct TSTree;
+class QTextDocument;
 
 class FoldManager : public QObject {
     Q_OBJECT
 public:
-    explicit FoldManager(QObject* parent = nullptr);
-    ~FoldManager() override;
+    explicit FoldManager(QObject* parent = nullptr) : QObject(parent) {}
 
-    FoldManager(const FoldManager&) = delete;
-    FoldManager& operator=(const FoldManager&) = delete;
+    // Called by highlighter after each parse with the new tree pointer.
+    void updateFoldRanges(void* tree, QTextDocument* doc);
 
-    void reparse(const QString& source);
+    void setDocument(QTextDocument* doc) { m_doc = doc; }
 
-    bool             hasFoldAt(int line) const;
-    bool             isLineHidden(int line) const;
-    void             toggleFold(int line);
-    const FoldRange* foldAt(int line) const;
-    const std::vector<FoldRange>& ranges() const;
+    bool isFoldable(int blockNumber) const;
+    bool isFolded(int blockNumber) const;
+    void toggleFold(int blockNumber);
+    void foldAll();
+    void unfoldAll();
+
+    int foldEndBlock(int blockNumber) const;
+    QMap<int, int> foldRanges() const;
+
+    // Returns the start-block of whichever active fold *contains* blockNumber
+    // (i.e. blockNumber is hidden inside that fold). Returns -1 if none.
+    int findFoldContaining(int blockNumber) const;
 
 signals:
-    void foldsChanged();
+    void foldChanged(int blockNumber, bool folded);
+    void foldRangesUpdated();
 
 private:
-    TSParser*                  m_parser = nullptr;
-    TSTree*                    m_tree   = nullptr;
-    std::unique_ptr<FoldQuery> m_query;
-    std::vector<FoldRange>     m_ranges;
+    void recomputeVisibility();
+    void collectFoldRanges(void* nodeRaw, QMap<int,int>& out);
+
+    QMap<int, int> m_foldRanges; // startBlock (0-based) -> endBlock (0-based)
+    QSet<int> m_foldedBlocks;
+    QTextDocument* m_doc = nullptr;
 };
