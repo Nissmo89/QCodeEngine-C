@@ -1,161 +1,175 @@
+// ============================================================================
+//  FoldManager.cpp  –  QCodeEngine-C
+//
+//  Tree-reuse design — no owned TSParser.
+//  The TSTree* is borrowed from TreeSitterHighlighter for the duration of
+//  updateFoldRanges(); the highlighter continues to own it.
+// ============================================================================
 #include "FoldManager.h"
-#include <QTextDocument>
 #include <QTextBlock>
-#include <QPlainTextDocumentLayout>
-#include <tree_sitter/api.h>
+#include <QDebug>
 
-bool FoldManager::isFoldable(int blockNumber) const {
-    return m_foldRanges.contains(blockNumber);
+extern "C" { const TSLanguage* tree_sitter_c(void); }
+
+// ---------------------------------------------------------------------------
+FoldManager::FoldManager(QObject* parent)
+    : QObject(parent)
+{
+    m_query = std::make_unique<FoldQuery>(tree_sitter_c());
+    if (!m_query->isValid())
+        qCritical() << "FoldManager: FoldQuery invalid — folding disabled";
 }
 
-bool FoldManager::isFolded(int blockNumber) const {
-    return m_foldedBlocks.contains(blockNumber);
-}
-
-void FoldManager::toggleFold(int blockNumber) {
-    if (!isFoldable(blockNumber) || !m_doc) return;
-
-    const bool folded = m_foldedBlocks.contains(blockNumber);
-    if (folded) {
-        m_foldedBlocks.remove(blockNumber);
-    } else {
-        m_foldedBlocks.insert(blockNumber);
-    }
-
-    recomputeVisibility();
-    emit foldChanged(blockNumber, !folded);
-}
-
-int FoldManager::foldEndBlock(int blockNumber) const {
-    return m_foldRanges.value(blockNumber, -1);
-}
-
-QMap<int, int> FoldManager::foldRanges() const {
-    return m_foldRanges;
-}
-
-int FoldManager::findFoldContaining(int blockNumber) const {
-    int result = -1;
-    for (int start : m_foldedBlocks) {
-        int end = m_foldRanges.value(start, -1);
-        if (blockNumber > start && blockNumber <= end) {
-            if (result < 0 || start > result)
-                result = start;
-        }
-    }
-    return result;
-}
-
-void FoldManager::foldAll() {
-    if (!m_doc) return;
-    for (auto it = m_foldRanges.begin(); it != m_foldRanges.end(); ++it) {
-        m_foldedBlocks.insert(it.key());
-    }
-    recomputeVisibility();
-}
-
-void FoldManager::unfoldAll() {
-    if (!m_doc) return;
-    m_foldedBlocks.clear();
-    recomputeVisibility();
-}
-
-void FoldManager::updateFoldRanges(void* tree, QTextDocument* doc) {
-    if (!doc) return;
+void FoldManager::setDocument(QTextDocument* doc)
+{
     m_doc = doc;
+}
 
-    QMap<int, int> newRanges;
-    if (tree) {
-        TSTree* tsTree = static_cast<TSTree*>(tree);
-        TSNode root = ts_tree_root_node(tsTree);
-        collectFoldRanges(&root, newRanges);
-    }
+// ---------------------------------------------------------------------------
+//  updateFoldRanges
+//  Called every time TreeSitterHighlighter finishes a parse.
+//  We borrow the TSTree* — cast it, run our query, then release.
+// ---------------------------------------------------------------------------
+void FoldManager::updateFoldRanges(void* treePtr, QTextDocument* doc)
+{
+    if (!treePtr) return;
 
-    QSet<int> newFolded;
-    for (int start : m_foldedBlocks) {
-        if (newRanges.contains(start)) {
-            newFolded.insert(start);
-        }
-    }
+    // Accept a document update (e.g. setText() wires a new document)
+    if (doc && doc != m_doc) m_doc = doc;
 
-    m_foldRanges = std::move(newRanges);
-    m_foldedBlocks = std::move(newFolded);
+    TSTree* tree = static_cast<TSTree*>(treePtr);
 
-    recomputeVisibility();
+    // Run fold query on the already-parsed tree (zero extra parsing cost)
+    std::vector<FoldRange> raw;
+    if (m_query && m_query->isValid())
+        raw = m_query->computeRanges(tree);
+
+    // Build new QMap, preserving collapsed state from previous generation
+    QMap<int,int> newRanges;
+    for (const FoldRange& fr : raw)
+        newRanges.insert(static_cast<int>(fr.startRow),
+                         static_cast<int>(fr.endRow));
+
+    // Preserve only collapsed starts that still exist in the new ranges
+    QSet<int> prevCollapsed = m_collapsed;
+    m_collapsed.clear();
+    for (int s : prevCollapsed)
+        if (newRanges.contains(s))
+            m_collapsed.insert(s);
+
+    m_ranges = std::move(newRanges);
+    rebuildCaches();
+    applyFoldsToDocument();
     emit foldRangesUpdated();
 }
 
-void FoldManager::recomputeVisibility() {
+// ---------------------------------------------------------------------------
+//  rebuildCaches — called after every state change
+// ---------------------------------------------------------------------------
+void FoldManager::rebuildCaches()
+{
+    m_foldHeaders.clear();
+    m_startToEnd.clear();
+    m_lineToFoldStart.clear();
+    m_hiddenLines.clear();
+
+    for (auto it = m_ranges.begin(); it != m_ranges.end(); ++it) {
+        const int start = it.key();
+        const int end   = it.value();
+        m_foldHeaders.insert(start);
+        m_startToEnd.insert(start, end);
+
+        if (m_collapsed.contains(start)) {
+            // Lines strictly between start and end are hidden.
+            // The closing brace line (end) stays visible — matches Zed/VS Code.
+            for (int row = start + 1; row < end; ++row) {
+                m_hiddenLines.insert(row);
+                m_lineToFoldStart.insert(row, start);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+//  applyFoldsToDocument — O(lines), one O(1) lookup per block
+// ---------------------------------------------------------------------------
+void FoldManager::applyFoldsToDocument()
+{
     if (!m_doc) return;
 
     QTextBlock block = m_doc->begin();
     while (block.isValid()) {
-        const int blockNumber = block.blockNumber();
-        bool visible = true;
-        for (int start : m_foldedBlocks) {
-            const int end = m_foldRanges.value(start, -1);
-            if (blockNumber > start && blockNumber <= end) {
-                visible = false;
-                break;
-            }
-        }
-
-        if (block.isVisible() != visible) {
-            block.setVisible(visible);
+        const bool hidden = m_hiddenLines.contains(block.blockNumber());
+        if (block.isVisible() == hidden) {
+            block.setVisible(!hidden);
+            block.setLineCount(hidden ? 0 : 1);
         }
         block = block.next();
     }
-
     m_doc->markContentsDirty(0, m_doc->characterCount());
-    if (auto* layout = qobject_cast<QPlainTextDocumentLayout*>(m_doc->documentLayout()))
-        layout->requestUpdate();
 }
 
-void FoldManager::collectFoldRanges(void* nodeRaw, QMap<int,int>& out) {
-    TSNode* pNode = static_cast<TSNode*>(nodeRaw);
-    TSNode node = *pNode;
+// ---------------------------------------------------------------------------
+//  O(1) queries
+// ---------------------------------------------------------------------------
+bool FoldManager::isFolded(int blockNumber) const
+{
+    // "folded" means: is a fold header AND is currently collapsed
+    return m_foldHeaders.contains(blockNumber)
+           && m_collapsed.contains(blockNumber);
+}
 
-    // NOTE: "compound_statement" is intentionally excluded here.
-    // It is always a child of one of the parent nodes below (function_definition,
-    // if_statement, etc.) and starts on the same line.  Including it caused
-    // duplicate fold arrows for K&R-style code where the opening brace lives on
-    // its own line (both the parent node and the compound_statement would each
-    // register a foldable entry for adjacent lines).
-    static const QSet<QString> SIGNATURE_NODES = {
-        "function_definition",
-        "struct_specifier",
-        "union_specifier",
-        "enum_specifier",
-        "if_statement",
-        "for_statement",
-        "while_statement",
-        "do_statement",
-        "switch_statement",
-        "comment",
-        "preproc_if",
-    };
+bool FoldManager::isLineHidden(int blockNumber) const
+{
+    return m_hiddenLines.contains(blockNumber);
+}
 
-    QString nodeType = QString::fromUtf8(ts_node_type(node));
-    if (SIGNATURE_NODES.contains(nodeType)) {
-        int startLine = (int)ts_node_start_point(node).row;
-        int endLine = (int)ts_node_end_point(node).row;
-        for (uint32_t i = 0; i < ts_node_child_count(node); ++i) {
-            TSNode child = ts_node_child(node, i);
-            if (QString::fromUtf8(ts_node_type(child)) == "compound_statement") {
-                startLine = (int)ts_node_start_point(child).row;
-                break;
-            }
-        }
-        if (endLine > startLine) {
-            auto existing = out.find(startLine);
-            if (existing == out.end() || existing.value() < endLine)
-                out[startLine] = endLine;
+int FoldManager::findFoldContaining(int blockNumber) const
+{
+    // Returns the startRow of the innermost collapsed fold that contains
+    // blockNumber, or -1.  Used by the auto-unfold guard.
+    auto it = m_lineToFoldStart.find(blockNumber);
+    return (it != m_lineToFoldStart.end()) ? it.value() : -1;
+}
+
+// ---------------------------------------------------------------------------
+//  Mutations
+// ---------------------------------------------------------------------------
+void FoldManager::toggleFold(int blockNumber)
+{
+    if (!m_foldHeaders.contains(blockNumber)) return;
+
+    if (m_collapsed.contains(blockNumber))
+        m_collapsed.remove(blockNumber);
+    else
+        m_collapsed.insert(blockNumber);
+
+    rebuildCaches();
+    applyFoldsToDocument();
+    emit foldStateChanged();
+}
+
+void FoldManager::foldAll()
+{
+    bool changed = false;
+    for (auto it = m_ranges.begin(); it != m_ranges.end(); ++it) {
+        if (!m_collapsed.contains(it.key())) {
+            m_collapsed.insert(it.key());
+            changed = true;
         }
     }
-
-    const uint32_t childCount = ts_node_child_count(node);
-    for (uint32_t i = 0; i < childCount; ++i) {
-        TSNode child = ts_node_child(node, i);
-        collectFoldRanges(&child, out);
+    if (changed) {
+        rebuildCaches();
+        applyFoldsToDocument();
+        emit foldStateChanged();
     }
+}
+
+void FoldManager::unfoldAll()
+{
+    if (m_collapsed.isEmpty()) return;
+    m_collapsed.clear();
+    rebuildCaches();
+    applyFoldsToDocument();
+    emit foldStateChanged();
 }

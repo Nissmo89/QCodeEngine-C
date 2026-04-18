@@ -40,6 +40,8 @@ add_library(QCodeEngine_C
     src/treesitterhelper.h
     src/treesitterhelper.cpp
     src/functionlistpopup.h
+    src/FoldQuery.cpp
+    src/FoldQuery.cpp
 )
 
 

@@ -1,6 +1,7 @@
 #pragma once
 #include <QPlainTextEdit>
 #include <QMap>
+#include <QTimer>
 #include "CodeEditor/CodeEditor.h"
 #include "CodeEditor/GutterWidget.h"
 #include "FoldManager.h"
@@ -21,7 +22,7 @@ class InnerEditor : public QPlainTextEdit {
     Q_OBJECT
 public:
     explicit InnerEditor(CodeEditorPrivate* d, QWidget* parent = nullptr);
-    
+
     QTextBlock firstVisibleBlock() const { return QPlainTextEdit::firstVisibleBlock(); }
     QRectF blockBoundingGeometry(const QTextBlock &block) const { return QPlainTextEdit::blockBoundingGeometry(block); }
     QPointF contentOffset() const { return QPlainTextEdit::contentOffset(); }
@@ -40,12 +41,13 @@ class CodeEditorPrivate : public QObject {
 public:
     explicit CodeEditorPrivate(CodeEditor* q, QWidget* parent = nullptr);
 
-  
+
 
     void updateCurrentLineHighlight();
     void updateLineNumberAreaWidth(int newBlockCount);
     void updateLineNumberArea(const QRect& rect, int dy);
-    void updateGutterFoldRanges();
+    void updateGutterFoldRanges();          // sync gutter arrows from FoldManager
+    void setFoldingEnabled(bool enabled);   // enable/disable fold feature
 
     bool handleKeyPress(QKeyEvent* e);
     void updateBracketMatch();
@@ -61,10 +63,13 @@ public:
     QMap<int, GutterIconInfo> m_icons;
 
     // Feature toggles
-    bool m_insertSpaces = true;
-    int m_tabWidth = 4;
-    bool m_autoBracket = true;
-    bool m_autoIndent = true;
+    bool m_insertSpaces    = true;
+    int  m_tabWidth        = 4;
+    bool m_autoBracket     = true;
+    bool m_autoIndent      = true;
+    bool m_foldingEnabled  = false;
+
+    QTimer* m_functionListTimer = nullptr;  // debounces updateFunctionList
 
     QList<QTextEdit::ExtraSelection> m_bracketSelections;
     QList<QTextEdit::ExtraSelection> m_searchSelections;
@@ -76,11 +81,11 @@ public:
     // QSearchBar* m_searchBar = nullptr;
     GutterWidget *m_gutter = nullptr;
 
-          // ✅ NEW members
+    // ✅ NEW members
     FloatingListPopup *m_functionPopup = nullptr;
     TreeSitterHelper *m_treeSitterHelper = nullptr;
 
-     // ✅ NEW functions
+    // ✅ NEW functions
     void updateFunctionList();
     void onFunctionSelected(int line);
 

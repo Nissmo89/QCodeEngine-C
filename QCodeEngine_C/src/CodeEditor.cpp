@@ -10,7 +10,7 @@
 
 extern "C" const TSLanguage *tree_sitter_c(void);
 
-// ── Bracket matching (caret highlights matching delimiter) ───────────────────
+// ── Bracket matching ─────────────────────────────────────────────────────────
 
 namespace {
 
@@ -18,11 +18,7 @@ struct CLexer {
     enum Phase { Normal, LineComment, BlockComment, String, Char } phase = Normal;
     bool esc = false;
 
-    // Only "code" (non-string, non-comment) brackets participate in matching.
-    // String/char literals may contain parens that must not pair with delimiters outside.
-    bool codeForBrackets() const {
-        return phase == Normal;
-    }
+    bool codeForBrackets() const { return phase == Normal; }
 
     void push(const QString& s, int i) {
         QChar c = s.at(i);
@@ -36,51 +32,23 @@ struct CLexer {
                 phase = Normal;
             return;
         case String:
-            if (esc) {
-                esc = false;
-                return;
-            }
-            if (c == QLatin1Char('\\')) {
-                esc = true;
-                return;
-            }
-            if (c == QLatin1Char('"'))
-                phase = Normal;
+            if (esc) { esc = false; return; }
+            if (c == QLatin1Char('\\')) { esc = true; return; }
+            if (c == QLatin1Char('"')) phase = Normal;
             return;
         case Char:
-            if (esc) {
-                esc = false;
-                return;
-            }
-            if (c == QLatin1Char('\\')) {
-                esc = true;
-                return;
-            }
-            if (c == QLatin1Char('\''))
-                phase = Normal;
+            if (esc) { esc = false; return; }
+            if (c == QLatin1Char('\\')) { esc = true; return; }
+            if (c == QLatin1Char('\'')) phase = Normal;
             return;
         case Normal:
             if (c == QLatin1Char('/') && i + 1 < s.size()) {
                 QChar n = s.at(i + 1);
-                if (n == QLatin1Char('/')) {
-                    phase = LineComment;
-                    return;
-                }
-                if (n == QLatin1Char('*')) {
-                    phase = BlockComment;
-                    return;
-                }
+                if (n == QLatin1Char('/')) { phase = LineComment; return; }
+                if (n == QLatin1Char('*')) { phase = BlockComment; return; }
             }
-            if (c == QLatin1Char('"')) {
-                phase = String;
-                esc = false;
-                return;
-            }
-            if (c == QLatin1Char('\'')) {
-                phase = Char;
-                esc = false;
-                return;
-            }
+            if (c == QLatin1Char('"'))  { phase = String; esc = false; return; }
+            if (c == QLatin1Char('\'')) { phase = Char;   esc = false; return; }
             return;
         }
     }
@@ -90,203 +58,101 @@ static void buildBracketCountableMask(const QString& s, QVector<bool>& mask) {
     const int n = s.size();
     mask.resize(n);
     CLexer lx;
-    for (int i = 0; i < n; ++i) {
-        mask[i] = lx.codeForBrackets();
-        lx.push(s, i);
-    }
+    for (int i = 0; i < n; ++i) { mask[i] = lx.codeForBrackets(); lx.push(s, i); }
 }
 
-static bool isBracketChar(QChar c) {
-    return c == QLatin1Char('(') || c == QLatin1Char(')') || c == QLatin1Char('[') || c == QLatin1Char(']')
-        || c == QLatin1Char('{') || c == QLatin1Char('}');
+static bool isBracketChar (QChar c) {
+    return c == '(' || c == ')' || c == '[' || c == ']' || c == '{' || c == '}';
 }
-
-static bool isOpenBracket(QChar c) {
-    return c == QLatin1Char('(') || c == QLatin1Char('[') || c == QLatin1Char('{');
-}
-
-static bool isCloseBracket(QChar c) {
-    return c == QLatin1Char(')') || c == QLatin1Char(']') || c == QLatin1Char('}');
-}
-
-static QChar closingFor(QChar open) {
-    if (open == QLatin1Char('('))
-        return QLatin1Char(')');
-    if (open == QLatin1Char('['))
-        return QLatin1Char(']');
-    if (open == QLatin1Char('{'))
-        return QLatin1Char('}');
+static bool isOpenBracket (QChar c) { return c == '(' || c == '[' || c == '{'; }
+static bool isCloseBracket(QChar c) { return c == ')' || c == ']' || c == '}'; }
+static QChar closingFor(QChar o) {
+    if (o == '(') return ')'; if (o == '[') return ']'; if (o == '{') return '}';
     return QChar();
 }
 
-// Returns partner index or -1 if unbalanced / mismatch.
 static int findClosingPartner(const QString& s, const QVector<bool>& mask, int openPos) {
-    QChar o = s.at(openPos);
-    if (!isOpenBracket(o))
-        return -1;
-    QVector<QChar> stack;
-    stack.push_back(closingFor(o));
-    const int n = s.size();
-    for (int i = openPos + 1; i < n; ++i) {
-        if (!mask.at(i))
-            continue;
+    if (!isOpenBracket(s.at(openPos))) return -1;
+    QVector<QChar> stack; stack.push_back(closingFor(s.at(openPos)));
+    for (int i = openPos + 1; i < s.size(); ++i) {
+        if (!mask.at(i)) continue;
         QChar c = s.at(i);
-        if (isOpenBracket(c)) {
-            stack.push_back(closingFor(c));
-        } else if (isCloseBracket(c)) {
-            if (stack.isEmpty())
-                return -1;
-            if (c != stack.last())
-                return -1;
+        if (isOpenBracket(c))  { stack.push_back(closingFor(c)); }
+        else if (isCloseBracket(c)) {
+            if (stack.isEmpty() || c != stack.last()) return -1;
             stack.pop_back();
-            if (stack.isEmpty())
-                return i;
+            if (stack.isEmpty()) return i;
         }
     }
     return -1;
 }
 
 static int findOpeningPartner(const QString& s, const QVector<bool>& mask, int closePos) {
-    QChar cl = s.at(closePos);
-    if (!isCloseBracket(cl))
-        return -1;
-    QVector<QChar> stack;
-    stack.push_back(cl);
+    if (!isCloseBracket(s.at(closePos))) return -1;
+    QVector<QChar> stack; stack.push_back(s.at(closePos));
     for (int i = closePos - 1; i >= 0; --i) {
-        if (!mask.at(i))
-            continue;
+        if (!mask.at(i)) continue;
         QChar c = s.at(i);
         if (isOpenBracket(c)) {
-            QChar wantClose = closingFor(c);
-            if (stack.isEmpty())
-                return -1;
-            if (wantClose != stack.last())
-                return -1;
+            if (stack.isEmpty() || closingFor(c) != stack.last()) return -1;
             stack.pop_back();
-            if (stack.isEmpty())
-                return i;
-        } else if (isCloseBracket(c)) {
-            stack.push_back(c);
-        }
+            if (stack.isEmpty()) return i;
+        } else if (isCloseBracket(c)) { stack.push_back(c); }
     }
     return -1;
 }
 
-// Prefer bracket under caret: character after caret, else character before.
 static int bracketIndexAtCursor(const QString& s, int cursorPos) {
     const int n = s.size();
-    if (n == 0)
-        return -1;
-    // Guard stale or invalid positions (e.g. document shrunk after cursor was sampled).
-    if (cursorPos >= 0 && cursorPos < n) {
-        QChar c = s.at(cursorPos);
-        if (isBracketChar(c))
-            return cursorPos;
-    }
-    if (cursorPos > 0 && cursorPos - 1 < n) {
-        QChar c = s.at(cursorPos - 1);
-        if (isBracketChar(c))
-            return cursorPos - 1;
-    }
+    if (n == 0) return -1;
+    if (cursorPos >= 0 && cursorPos < n   && isBracketChar(s.at(cursorPos)))   return cursorPos;
+    if (cursorPos > 0  && cursorPos-1 < n && isBracketChar(s.at(cursorPos-1))) return cursorPos - 1;
     return -1;
 }
 
 } // namespace
+
+// ── Format map ───────────────────────────────────────────────────────────────
 
 static FormatMap generateFormatMap(const QEditorTheme& theme) {
     FormatMap fmap;
     auto makeFormat = [](QColor color, bool bold = false, bool italic = false) {
         QTextCharFormat fmt;
         fmt.setForeground(color);
-        if (bold) fmt.setFontWeight(QFont::Bold);
+        if (bold)   fmt.setFontWeight(QFont::Bold);
         if (italic) fmt.setFontItalic(true);
         return fmt;
     };
-
-    // ── Keywords ──────────────────────────────────────────────────────────────
-    // @keyword          — const, enum, extern, inline, sizeof, static, struct, typedef, union, volatile
-    fmap["keyword"]             = makeFormat(theme.tokenKeyword, theme.keywordBold);
-    // @keyword.control  — break, case, continue, default, do, else, for, goto, if, return, switch, while
-    fmap["keyword.control"]     = makeFormat(theme.tokenKeywordControl, theme.keywordBold);
-    // @keyword.preproc  — #define, #elif, #else, #endif, #if, #ifdef, #ifndef, #include, (preproc_directive)
-    fmap["keyword.preproc"]     = makeFormat(theme.tokenKeywordPreproc, theme.keywordBold);
-    // @preproc          — also used for the preproc group (alias in highlights.scm: @keyword.preproc @preproc)
-    fmap["preproc"]             = makeFormat(theme.tokenKeywordPreproc);
-    // @preproc.arg      — the raw token content after #define / #include
-    fmap["preproc.arg"]         = makeFormat(theme.tokenPreprocessor);
-
-    // ── Operators & Punctuation ───────────────────────────────────────────────
-    // @operator         — all arithmetic, logical, comparison, assignment operators
-    fmap["operator"]            = makeFormat(theme.tokenOperator);
-    // @punctuation.delimiter — . ; ,
+    fmap["keyword"]               = makeFormat(theme.tokenKeyword, theme.keywordBold);
+    fmap["keyword.control"]       = makeFormat(theme.tokenKeywordControl, theme.keywordBold);
+    fmap["keyword.preproc"]       = makeFormat(theme.tokenKeywordPreproc, theme.keywordBold);
+    fmap["preproc"]               = makeFormat(theme.tokenKeywordPreproc);
+    fmap["preproc.arg"]           = makeFormat(theme.tokenPreprocessor);
+    fmap["operator"]              = makeFormat(theme.tokenOperator);
     fmap["punctuation.delimiter"] = makeFormat(theme.tokenPunctuation);
-    // @punctuation.bracket   — { } ( ) [ ]
-    fmap["punctuation.bracket"] = makeFormat(theme.tokenPunctuation);
-    // generic parent fallback (resolver walks up dots)
-    fmap["punctuation"]         = makeFormat(theme.tokenPunctuation);
-
-    // ── Literals ─────────────────────────────────────────────────────────────
-    // @string           — string_literal, system_lib_string, char_literal
-    fmap["string"]              = makeFormat(theme.tokenString);
-    // @string.escape    — \n, \t, \x41, … inside string/char literals
-    fmap["string.escape"]       = makeFormat(theme.tokenEscape);
-    // @number           — integer, float, hex, octal literals
-    fmap["number"]              = makeFormat(theme.tokenNumber);
-    // @boolean          — true / false
-    fmap["boolean"]             = makeFormat(theme.tokenBoolean);
-    // @constant.builtin — NULL, nullptr (node type "null")
-    fmap["constant.builtin"]    = makeFormat(theme.tokenConstantBuiltin);
-    // @constant         — ALL_CAPS identifiers matched by regex
-    fmap["constant"]            = makeFormat(theme.tokenConstant);
-
-    // ── Comments ─────────────────────────────────────────────────────────────
-    // @comment          — // and /* */ comments
-    fmap["comment"]             = makeFormat(theme.tokenComment, false, theme.commentItalic);
-
-    // ── Identifiers ──────────────────────────────────────────────────────────
-    // @variable         — plain (identifier) fallback
-    fmap["variable"]            = makeFormat(theme.tokenIdentifier);
-
-    // ── Functions ────────────────────────────────────────────────────────────
-    // @function         — function declarators and call-expression targets
-    fmap["function"]            = makeFormat(theme.tokenFunction, theme.functionBold);
-    // @function.special — preproc_function_def macro names
-    fmap["function.special"]    = makeFormat(theme.tokenKeywordPreproc, theme.functionBold);
-
-    // ── Types ─────────────────────────────────────────────────────────────────
-    // @type             — type_identifier, primitive_type, sized_type_specifier
-    fmap["type"]                = makeFormat(theme.tokenType, theme.typeBold);
-
-    // ── Struct / Record fields ────────────────────────────────────────────────
-    // @property         — field_identifier (struct member access)
-    fmap["property"]            = makeFormat(theme.tokenField);
-
-    // ── Labels ────────────────────────────────────────────────────────────────
-    // @label            — statement_identifier (goto labels)
-    fmap["label"]               = makeFormat(theme.tokenLabel);
-
-    // ── Attributes ───────────────────────────────────────────────────────────
-    // @attribute        — GNU __attribute__((…)) and C23 [[attributes]]
-    fmap["attribute"]           = makeFormat(theme.tokenAttribute);
-
-    // ── Catch-all fallback ────────────────────────────────────────────────────
-    // If get_format_for_capture_name exhausts all dot-separated ancestors the
-    // resolver returns format_map[""]. Seeding it here with the editor foreground
-    // prevents invisible text for any capture name that has no mapping.
-    {
-        QTextCharFormat fallback;
-        fallback.setForeground(theme.foreground);
-        fmap[""] = fallback;
-    }
-
+    fmap["punctuation.bracket"]   = makeFormat(theme.tokenPunctuation);
+    fmap["punctuation"]           = makeFormat(theme.tokenPunctuation);
+    fmap["string"]                = makeFormat(theme.tokenString);
+    fmap["string.escape"]         = makeFormat(theme.tokenEscape);
+    fmap["number"]                = makeFormat(theme.tokenNumber);
+    fmap["boolean"]               = makeFormat(theme.tokenBoolean);
+    fmap["constant.builtin"]      = makeFormat(theme.tokenConstantBuiltin);
+    fmap["constant"]              = makeFormat(theme.tokenConstant);
+    fmap["comment"]               = makeFormat(theme.tokenComment, false, theme.commentItalic);
+    fmap["variable"]              = makeFormat(theme.tokenIdentifier);
+    fmap["function"]              = makeFormat(theme.tokenFunction, theme.functionBold);
+    fmap["function.special"]      = makeFormat(theme.tokenKeywordPreproc, theme.functionBold);
+    fmap["type"]                  = makeFormat(theme.tokenType, theme.typeBold);
+    fmap["property"]              = makeFormat(theme.tokenField);
+    fmap["label"]                 = makeFormat(theme.tokenLabel);
+    fmap["attribute"]             = makeFormat(theme.tokenAttribute);
+    { QTextCharFormat fb; fb.setForeground(theme.foreground); fmap[""] = fb; }
     return fmap;
 }
 
 static void applyEditorStyle(QPlainTextEdit* editor, int lineHeightPx = 26) {
     QTextBlockFormat fmt;
     fmt.setLineHeight(lineHeightPx, QTextBlockFormat::FixedHeight);
-    // Apply to the document default format so every new block inherits it,
-    // and to the whole existing document.
     QTextCursor cursor(editor->document());
     cursor.beginEditBlock();
     cursor.select(QTextCursor::Document);
@@ -295,6 +161,8 @@ static void applyEditorStyle(QPlainTextEdit* editor, int lineHeightPx = 26) {
     cursor.endEditBlock();
 }
 
+// ── InnerEditor ──────────────────────────────────────────────────────────────
+
 InnerEditor::InnerEditor(CodeEditorPrivate* d, QWidget* parent)
     : QPlainTextEdit(parent), d_ptr(d) {}
 
@@ -302,51 +170,55 @@ void InnerEditor::keyPressEvent(QKeyEvent* e) {
     if (d_ptr->m_completer && d_ptr->m_completer->handleKeyPress(e)) return;
     if (d_ptr->handleKeyPress(e)) return;
     QPlainTextEdit::keyPressEvent(e);
-    
-    if (d_ptr->m_completer && !e->text().isEmpty()) {
+    if (d_ptr->m_completer && !e->text().isEmpty())
         d_ptr->m_completer->updatePopup();
-    }
 }
 
 void InnerEditor::paintEvent(QPaintEvent* e) {
     QPlainTextEdit::paintEvent(e);
 
+    // Draw " ...}" hint on collapsed fold header lines
+    if (!d_ptr->m_foldingEnabled) return;
+
     QPainter painter(viewport());
     painter.setFont(font());
+    QFontMetrics fm(font());
 
     QTextBlock block = firstVisibleBlock();
-    int blockNumber = block.blockNumber();
-    qreal top = blockBoundingGeometry(block).translated(contentOffset()).top();
+    int  blockNumber = block.blockNumber();
+    qreal top    = blockBoundingGeometry(block).translated(contentOffset()).top();
     qreal bottom = top + blockBoundingRect(block).height();
 
     while (block.isValid() && top <= e->rect().bottom()) {
         if (block.isVisible() && bottom >= e->rect().top()) {
             if (d_ptr->m_foldManager->isFolded(blockNumber)) {
-                QString text = block.text();
-                QFontMetrics fm(font());
-                int textWidth = fm.horizontalAdvance(text.replace('\t', QString(d_ptr->m_tabWidth, ' ')));
-                int blockH    = (int)(bottom - top); // actual row height (fixed at 26 px by style)
+                // Measure the existing line text to place hint after it
+                const int textW = fm.horizontalAdvance(
+                    block.text().replace('\t', QString(d_ptr->m_tabWidth, ' ')));
+                const int blockH = static_cast<int>(bottom - top);
 
                 painter.save();
                 painter.setPen(d_ptr->m_theme.tokenComment);
-                // Use the full block height so AlignVCenter lands in the middle of the row.
-                painter.drawText(textWidth + 8, (int)top,
+                painter.drawText(textW + 8, static_cast<int>(top),
                                  fm.horizontalAdvance(" ...}"), blockH,
-                                 Qt::AlignLeft | Qt::AlignVCenter, " ...}");
+                                 Qt::AlignLeft | Qt::AlignVCenter,
+                                 " ...}");
                 painter.restore();
             }
         }
         block = block.next();
-        top = bottom;
+        top   = bottom;
         bottom = top + blockBoundingRect(block).height();
         ++blockNumber;
     }
 }
 
+// ── CodeEditorPrivate constructor ─────────────────────────────────────────────
+
 CodeEditorPrivate::CodeEditorPrivate(CodeEditor* q, QWidget* parent)
-    : QObject(parent), q_ptr(q), m_editor(new InnerEditor(this)) 
+    : QObject(parent), q_ptr(q), m_editor(new InnerEditor(this))
 {
-    m_gutter = new GutterWidget(m_editor, q);
+    m_gutter      = new GutterWidget(m_editor, q);
     m_foldManager = new FoldManager(this);
     m_foldManager->setDocument(m_editor->document());
 
@@ -356,120 +228,154 @@ CodeEditorPrivate::CodeEditorPrivate(CodeEditor* q, QWidget* parent)
     layout->addWidget(m_gutter);
     layout->addWidget(m_editor);
 
-    // Hook contentsChange(from,removed,added) — cheaper than contentsChanged:
-    // only touch the blocks that actually changed instead of walking the entire document.
+    // Keep line-height format consistent after content changes
     connect(m_editor->document(), &QTextDocument::contentsChange,
             m_editor, [this](int from, int /*charsRemoved*/, int charsAdded) {
-        if (charsAdded <= 0) return;
-        QTextBlock b = m_editor->document()->findBlock(from);
-        QTextBlock end = m_editor->document()->findBlock(from + charsAdded);
-        QTextBlockFormat fmt;
-        fmt.setLineHeight(26, QTextBlockFormat::FixedHeight);
-        QTextCursor cur(m_editor->document());
-        cur.beginEditBlock();
-        while (b.isValid()) {
-            if (b.blockFormat().lineHeightType() != QTextBlockFormat::FixedHeight) {
-                cur.setPosition(b.position());
-                cur.setBlockFormat(fmt);
-            }
-            if (b == end) break;
-            b = b.next();
-        }
-        cur.endEditBlock();
-    });
+                if (charsAdded <= 0) return;
+                QTextBlock b   = m_editor->document()->findBlock(from);
+                QTextBlock end = m_editor->document()->findBlock(from + charsAdded);
+                QTextBlockFormat fmt;
+                fmt.setLineHeight(26, QTextBlockFormat::FixedHeight);
+                QTextCursor cur(m_editor->document());
+                cur.beginEditBlock();
+                while (b.isValid()) {
+                    if (b.blockFormat().lineHeightType() != QTextBlockFormat::FixedHeight) {
+                        cur.setPosition(b.position());
+                        cur.setBlockFormat(fmt);
+                    }
+                    if (b == end) break;
+                    b = b.next();
+                }
+                cur.endEditBlock();
+            });
 
-    m_highlighter = new TreeSitterHighlighter(tree_sitter_c(), std::string(HIGHLIGHTS_SCM), generateFormatMap(m_theme), m_editor->document());
+    // ── Highlighter setup ────────────────────────────────────────────────────
+    m_highlighter = new TreeSitterHighlighter(
+        tree_sitter_c(), std::string(HIGHLIGHTS_SCM),
+        generateFormatMap(m_theme), m_editor->document());
     m_highlighter->set_rainbow_colors(m_theme.rainbowColors);
-    
-    connect(m_highlighter, &TreeSitterHighlighter::parsed, this, [this](void* treePtr) {
-        m_foldManager->updateFoldRanges(treePtr, m_editor->document());
 
-        QMap<int, int> foldRanges = m_foldManager->foldRanges();
-        QList<FoldArea::FoldRange> ranges;
-        for (auto it = foldRanges.begin(); it != foldRanges.end(); ++it) {
-            ranges.append({it.key() + 1, it.value() + 1, m_foldManager->isFolded(it.key())});
-        }
-        m_gutter->setFoldRanges(ranges);
-        m_gutter->update();
-    });
-    // After fold ranges rebuilt, refresh the gutter so fold arrows appear correctly
-    connect(m_foldManager, &FoldManager::foldRangesUpdated, m_gutter, [this]() {
-        m_gutter->update();
+    // ── FoldManager wired to highlighter "parsed" signal ────────────────────
+    // KEY DESIGN: the highlighter already ran a full incremental tree-sitter
+    // parse.  We hand the finished TSTree* to FoldManager so it can run fold
+    // queries on it — zero additional parsing cost.
+    connect(m_highlighter, &TreeSitterHighlighter::parsed,
+            this, [this](void* treePtr) {
+                if (m_foldingEnabled)
+                    m_foldManager->updateFoldRanges(treePtr, m_editor->document());
+            });
+
+    // After fold ranges are rebuilt, refresh the gutter arrows
+    connect(m_foldManager, &FoldManager::foldRangesUpdated,
+            this, &CodeEditorPrivate::updateGutterFoldRanges);
+
+    // After a toggle (collapse/expand), refresh gutter and repaint viewport
+    connect(m_foldManager, &FoldManager::foldStateChanged, this, [this]() {
+        updateGutterFoldRanges();
+        m_editor->viewport()->update();
     });
 
+    // ── Auto-completer ───────────────────────────────────────────────────────
     m_completer = new AutoCompleter(this);
     m_completer->setEditor(m_editor);
 
-    // Disable word wrap by default for code
     m_editor->setLineWrapMode(QPlainTextEdit::NoWrap);
 
-    connect(m_editor, &QPlainTextEdit::blockCountChanged, this, &CodeEditorPrivate::updateLineNumberAreaWidth);
-    connect(m_editor, &QPlainTextEdit::cursorPositionChanged, this, &CodeEditorPrivate::onCursorPositionChanged);
-    connect(m_editor, &QPlainTextEdit::textChanged, this, &CodeEditorPrivate::onTextChanged);
+    connect(m_editor, &QPlainTextEdit::blockCountChanged,
+            this, &CodeEditorPrivate::updateLineNumberAreaWidth);
+    connect(m_editor, &QPlainTextEdit::cursorPositionChanged,
+            this, &CodeEditorPrivate::onCursorPositionChanged);
+    connect(m_editor, &QPlainTextEdit::textChanged,
+            this, &CodeEditorPrivate::onTextChanged);
 
-    connect(m_gutter, &GutterWidget::foldToggled, this, &CodeEditorPrivate::onGutterFoldClicked);
-    
-    connect(m_gutter, &GutterWidget::markerToggled, this, [this](int line, MarkerType type) {
-        GutterIconType iconType = GutterIconType::Info;
-        if (type == MarkerType::Error) iconType = GutterIconType::Error;
-        else if (type == MarkerType::Warning) iconType = GutterIconType::Warning;
-        else if (type == MarkerType::Breakpoint) iconType = GutterIconType::Breakpoint;
-        emit q_ptr->gutterIconClicked(line, iconType);
-    });
-    // Also wire QTextDocument::modificationChanged to emit our public signal
+    connect(m_gutter, &GutterWidget::foldToggled,
+            this, &CodeEditorPrivate::onGutterFoldClicked);
+    connect(m_gutter, &GutterWidget::markerToggled,
+            this, [this](int line, MarkerType type) {
+                GutterIconType iconType = GutterIconType::Info;
+                if (type == MarkerType::Error)      iconType = GutterIconType::Error;
+                else if (type == MarkerType::Warning)    iconType = GutterIconType::Warning;
+                else if (type == MarkerType::Breakpoint) iconType = GutterIconType::Breakpoint;
+                emit q_ptr->gutterIconClicked(line, iconType);
+            });
     connect(m_editor->document(), &QTextDocument::modificationChanged,
             this, [this](bool modified) {
-        emit q_ptr->documentModifiedChanged(modified);
-    });
+                emit q_ptr->documentModifiedChanged(modified);
+            });
 
     applyEditorStyle(m_editor);
     updateLineNumberAreaWidth(0);
 
-
-    m_functionPopup = new FloatingListPopup(q);  // Parent is the CodeEditor widget
-        
+    // ── Function list popup ──────────────────────────────────────────────────
+    m_functionPopup = new FloatingListPopup(q);
     connect(m_functionPopup, &FloatingListPopup::functionSelected,
             this, &CodeEditorPrivate::onFunctionSelected);
-    
-    // When document changes, update function list
+
+    // Debounced: updateFunctionList does a full parse; don't fire on every keystroke
+    m_functionListTimer = new QTimer(this);
+    m_functionListTimer->setSingleShot(true);
+    m_functionListTimer->setInterval(500);
     connect(m_editor->document(), &QTextDocument::contentsChanged,
+            this, [this]() { m_functionListTimer->start(); });
+    connect(m_functionListTimer, &QTimer::timeout,
             this, &CodeEditorPrivate::updateFunctionList);
 
-    // In CodeEditor constructor, after m_functionPopup setup
-
-    QAction *showFunctionsAction = new QAction(q);
-    showFunctionsAction->setShortcut(QKeySequence("Ctrl+Shift+O"));  // ✅ Qt 6 compatible
+    QAction* showFunctionsAction = new QAction(q);
+    showFunctionsAction->setShortcut(QKeySequence("Ctrl+Shift+O"));
     connect(showFunctionsAction, &QAction::triggered, q, &CodeEditor::showFunctionList);
     q->addAction(showFunctionsAction);
 
-    // Ensure the gutter repaints after the editor viewport's first layout
-    // pass. blockBoundingGeometry() returns zero-height rects until Qt's
-    // lazy document layout runs, which happens only after the first
-    // paintEvent of the editor viewport — i.e. after the event loop starts.
     QTimer::singleShot(0, this, [this]() {
         m_gutter->updateWidth();
         m_gutter->update();
     });
 }
 
-void CodeEditorPrivate::updateLineNumberAreaWidth(int /* newBlockCount */) {
+// ── Private helpers ───────────────────────────────────────────────────────────
+
+void CodeEditorPrivate::updateLineNumberAreaWidth(int) {
     m_gutter->updateWidth();
 }
 
 void CodeEditorPrivate::updateLineNumberArea(const QRect& rect, int dy) {
     m_gutter->syncScrollWith(rect, dy);
-    if (rect.contains(m_editor->viewport()->rect())) {
+    if (rect.contains(m_editor->viewport()->rect()))
         updateLineNumberAreaWidth(0);
-    }
 }
 
-void CodeEditorPrivate::updateGutterFoldRanges() {
-    QMap<int, int> foldRanges = m_foldManager->foldRanges();
+void CodeEditorPrivate::updateGutterFoldRanges()
+{
+    // Convert 0-based FoldManager ranges to 1-based FoldArea::FoldRange list
+    const QMap<int,int>& foldMap = m_foldManager->foldRanges();
     QList<FoldArea::FoldRange> ranges;
-    for (auto it = foldRanges.begin(); it != foldRanges.end(); ++it) {
-        ranges.append({it.key() + 1, it.value() + 1, m_foldManager->isFolded(it.key())});
+    ranges.reserve(foldMap.size());
+    for (auto it = foldMap.begin(); it != foldMap.end(); ++it) {
+        ranges.append({ it.key() + 1,               // startLine (1-based)
+                       it.value() + 1,              // endLine   (1-based)
+                       m_foldManager->isFolded(it.key()) });
     }
     m_gutter->setFoldRanges(ranges);
+    m_gutter->update();
+}
+
+void CodeEditorPrivate::setFoldingEnabled(bool enabled)
+{
+    m_foldingEnabled = enabled;
+    if (!enabled) {
+        // Unhide all blocks when folding is turned off
+        QTextDocument* doc = m_editor->document();
+        QTextBlock block = doc->begin();
+        while (block.isValid()) {
+            if (!block.isVisible()) {
+                block.setVisible(true);
+                block.setLineCount(1);
+            }
+            block = block.next();
+        }
+        doc->markContentsDirty(0, doc->characterCount());
+        m_editor->viewport()->update();
+        m_foldManager->unfoldAll();
+    }
 }
 
 void CodeEditorPrivate::updateCurrentLineHighlight() {
@@ -482,10 +388,8 @@ void CodeEditorPrivate::updateCurrentLineHighlight() {
         sel.cursor.clearSelection();
         extras.append(sel);
     }
-    
     extras.append(m_bracketSelections);
     extras.append(m_searchSelections);
-
     m_editor->setExtraSelections(extras);
 }
 
@@ -495,23 +399,19 @@ void CodeEditorPrivate::updateBracketMatch() {
     const QString text = doc->toPlainText();
     const int cursorPos = m_editor->textCursor().position();
     const int idx = bracketIndexAtCursor(text, cursorPos);
-    if (idx < 0)
-        return;
+    if (idx < 0) return;
 
     QVector<bool> mask;
     buildBracketCountableMask(text, mask);
-    if (!mask.at(idx))
-        return;
+    if (!mask.at(idx)) return;
 
     auto makeSel = [doc, this](int from, int len, bool mismatch) {
         QTextEdit::ExtraSelection es;
-        QTextCharFormat& f = es.format;
         if (mismatch) {
-            f.setBackground(m_theme.bracketMismatchBackground);
-            if (!m_theme.bracketMismatchBackground.isValid())
-                f.setBackground(QColor(180, 60, 60, 90));
+            es.format.setBackground(m_theme.bracketMismatchBackground.isValid()
+                                    ? m_theme.bracketMismatchBackground : QColor(180, 60, 60, 90));
         } else {
-            f.setBackground(m_theme.bracketMatchBackground);
+            es.format.setBackground(m_theme.bracketMatchBackground);
         }
         es.cursor = QTextCursor(doc);
         es.cursor.setPosition(from);
@@ -520,25 +420,14 @@ void CodeEditorPrivate::updateBracketMatch() {
     };
 
     const QChar ch = text.at(idx);
-
     if (isOpenBracket(ch)) {
-        const int partner = findClosingPartner(text, mask, idx);
-        if (partner < 0) {
-            m_bracketSelections.append(makeSel(idx, 1, true));
-            return;
-        }
-        m_bracketSelections.append(makeSel(idx, 1, false));
-        m_bracketSelections.append(makeSel(partner, 1, false));
-        return;
-    }
-    if (isCloseBracket(ch)) {
-        const int partner = findOpeningPartner(text, mask, idx);
-        if (partner < 0) {
-            m_bracketSelections.append(makeSel(idx, 1, true));
-            return;
-        }
-        m_bracketSelections.append(makeSel(idx, 1, false));
-        m_bracketSelections.append(makeSel(partner, 1, false));
+        int partner = findClosingPartner(text, mask, idx);
+        m_bracketSelections.append(makeSel(idx, 1, partner < 0));
+        if (partner >= 0) m_bracketSelections.append(makeSel(partner, 1, false));
+    } else if (isCloseBracket(ch)) {
+        int partner = findOpeningPartner(text, mask, idx);
+        m_bracketSelections.append(makeSel(idx, 1, partner < 0));
+        if (partner >= 0) m_bracketSelections.append(makeSel(partner, 1, false));
     }
 }
 
@@ -546,60 +435,42 @@ bool CodeEditorPrivate::handleKeyPress(QKeyEvent* event) {
     if (event->modifiers() & Qt::ControlModifier && event->key() == Qt::Key_T) {
         static int themeIndex = 0;
         static const std::function<QEditorTheme()> themes[] = {
-            QEditorTheme::oneDarkTheme,
-            QEditorTheme::draculaTheme,
-            QEditorTheme::monokaiTheme,
-            QEditorTheme::solarizedDarkTheme,
-            QEditorTheme::githubLightTheme ,
-            QEditorTheme::cursorDarkTheme
+            QEditorTheme::oneDarkTheme, QEditorTheme::draculaTheme,
+            QEditorTheme::monokaiTheme, QEditorTheme::solarizedDarkTheme,
+            QEditorTheme::githubLightTheme, QEditorTheme::cursorDarkTheme
         };
-        size_t themes_size = sizeof(themes) / sizeof(themes[0]);
-        themeIndex = (themeIndex + 1) % themes_size;
+        themeIndex = (themeIndex + 1) % (int)(sizeof(themes)/sizeof(themes[0]));
         q_ptr->setTheme(themes[themeIndex]());
         return true;
     }
-
-
     if (event->key() == Qt::Key_Tab && m_editor->textCursor().hasSelection()) {
-        indentSelection(true);
-        return true;
+        indentSelection(true); return true;
     }
-    if (event->key() == Qt::Key_Backtab) {
-        indentSelection(false);
-        return true;
-    }
+    if (event->key() == Qt::Key_Backtab) { indentSelection(false); return true; }
     if (event->key() == Qt::Key_Slash && (event->modifiers() & Qt::ControlModifier)) {
-        toggleLineComment();
-        return true;
+        toggleLineComment(); return true;
     }
-    
     if (m_autoIndent && (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)) {
         QTextCursor cursor = m_editor->textCursor();
         QString currentLine = cursor.block().text();
         int spaces = 0;
         for (QChar ch : currentLine) {
-            if (ch == ' ') spaces++;
-            else if (ch == '\t') spaces += m_tabWidth;
-            else break;
+            if (ch == ' ') spaces++; else if (ch == '\t') spaces += m_tabWidth; else break;
         }
-
         bool openBrace = currentLine.trimmed().endsWith('{');
         cursor.insertText("\n");
         QString indent = m_insertSpaces
-            ? QString(spaces + (openBrace ? m_tabWidth : 0), ' ')
-            : QString(spaces / m_tabWidth + (openBrace ? 1 : 0), '\t');
+                             ? QString(spaces + (openBrace ? m_tabWidth : 0), ' ')
+                             : QString(spaces / m_tabWidth + (openBrace ? 1 : 0), '\t');
         cursor.insertText(indent);
         m_editor->setTextCursor(cursor);
         return true;
     }
-
     if (m_autoBracket) {
         QChar typed = event->text().isEmpty() ? QChar() : event->text()[0];
-        static const QMap<QChar, QChar> pairs = {
-            {'(', ')'}, {'[', ']'}, {'{', '}'}, {'"', '"'}, {'\'', '\''}
+        static const QMap<QChar,QChar> pairs = {
+            {'(',')'}, {'[',']'}, {'{','}'}, {'"','"'}, {'\'','\''}
         };
-        // Skip-over: if the user types a closing char that is already the next
-        // character in the document (placed by auto-bracket), just move right.
         static const QSet<QChar> closers = {')', ']', '}', '"', '\''};
         if (closers.contains(typed)) {
             QTextCursor cursor = m_editor->textCursor();
@@ -613,7 +484,6 @@ bool CodeEditorPrivate::handleKeyPress(QKeyEvent* event) {
                 }
             }
         }
-
         if (pairs.contains(typed)) {
             QTextCursor cursor = m_editor->textCursor();
             cursor.beginEditBlock();
@@ -624,18 +494,14 @@ bool CodeEditorPrivate::handleKeyPress(QKeyEvent* event) {
             return true;
         }
     }
-    
     return false;
 }
 
 void CodeEditorPrivate::indentSelection(bool indent) {
     QTextCursor cursor = m_editor->textCursor();
-    int start = cursor.selectionStart();
-    int end   = cursor.selectionEnd();
-    
+    int start = cursor.selectionStart(), end = cursor.selectionEnd();
     QTextBlock block = m_editor->document()->findBlock(start);
-    int endBlockNum = m_editor->document()->findBlock(qMax(0, end - (cursor.hasSelection() ? 1 : 0))).blockNumber();
-
+    int endBlockNum  = m_editor->document()->findBlock(qMax(0, end-(cursor.hasSelection()?1:0))).blockNumber();
     cursor.beginEditBlock();
     while (block.isValid() && block.blockNumber() <= endBlockNum) {
         QTextCursor bc(block);
@@ -643,12 +509,9 @@ void CodeEditorPrivate::indentSelection(bool indent) {
             bc.movePosition(QTextCursor::StartOfBlock);
             bc.insertText(m_insertSpaces ? QString(m_tabWidth, ' ') : "\t");
         } else {
-            QString text = block.text();
-            int toRemove = 0;
+            QString text = block.text(); int toRemove = 0;
             for (int i = 0; i < qMin(m_tabWidth, text.size()); ++i) {
-                if (text[i] == ' ') toRemove++;
-                else if (text[i] == '\t') { toRemove = 1; break; }
-                else break;
+                if (text[i]==' ') toRemove++; else if(text[i]=='\t'){toRemove=1;break;} else break;
             }
             bc.movePosition(QTextCursor::StartOfBlock);
             bc.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, toRemove);
@@ -661,28 +524,21 @@ void CodeEditorPrivate::indentSelection(bool indent) {
 
 void CodeEditorPrivate::toggleLineComment() {
     QTextCursor cursor = m_editor->textCursor();
-    int start = cursor.selectionStart();
-    int end   = cursor.selectionEnd();
-    
+    int start = cursor.selectionStart(), end = cursor.selectionEnd();
     QTextBlock block = m_editor->document()->findBlock(start);
-    // If we select exactly matching a full block without trailing into the next, avoid overreaching.
-    int endBlockNum = m_editor->document()->findBlock(qMax(0, end - (cursor.hasSelection() ? 1 : 0))).blockNumber();
-
+    int endBlockNum  = m_editor->document()->findBlock(qMax(0,end-(cursor.hasSelection()?1:0))).blockNumber();
     cursor.beginEditBlock();
     while (block.isValid() && block.blockNumber() <= endBlockNum) {
         QTextCursor bc(block);
-        QString lineText = block.text();
-        QString trimmed = lineText.trimmed();
+        QString lineText = block.text(), trimmed = lineText.trimmed();
         if (trimmed.startsWith("//")) {
-            // Uncommenting: strip // from wherever it appears
             int pos = lineText.indexOf("//");
             bc.setPosition(block.position() + pos);
             bc.movePosition(QTextCursor::Right, QTextCursor::KeepAnchor, 2);
             bc.removeSelectedText();
         } else {
-            // Commenting: advance past leading whitespace, insert // there
             int indent = 0;
-            while (indent < lineText.size() && (lineText.at(indent) == ' ' || lineText.at(indent) == '\t'))
+            while (indent < lineText.size() && (lineText.at(indent)==' '||lineText.at(indent)=='\t'))
                 ++indent;
             bc.setPosition(block.position() + indent);
             bc.insertText("//");
@@ -693,56 +549,63 @@ void CodeEditorPrivate::toggleLineComment() {
 }
 
 void CodeEditorPrivate::onCursorPositionChanged() {
-    // ── Auto-unfold guard ──────────────────────────────────────────────────
-    // If the cursor somehow lands on a hidden block (e.g. the user arrowed
-    // into a folded region), find the fold that contains it and open it so
-    // the cursor is never stranded inside invisible text.
+    // ── Auto-unfold guard ────────────────────────────────────────────────────
+    // If the cursor lands on a hidden block, find the innermost collapsed fold
+    // containing it and open that fold.
+    // Boundary: startRow < line < endRow (exclusive, closing brace stays visible)
     {
         QTextBlock curBlock = m_editor->textCursor().block();
         if (!curBlock.isVisible()) {
             int foldStart = m_foldManager->findFoldContaining(curBlock.blockNumber());
             if (foldStart >= 0) {
                 m_foldManager->toggleFold(foldStart);
-                m_gutter->update();
+                // foldStateChanged signal will trigger updateGutterFoldRanges + viewport update
             }
         }
     }
-    // ─────────────────────────────────────────────────────────────────────
     updateBracketMatch();
     updateCurrentLineHighlight();
     QTextCursor cur = m_editor->textCursor();
     int blockNum = cur.blockNumber();
     m_gutter->setCurrentLine(blockNum + 1);
     emit q_ptr->cursorPositionChanged(blockNum + 1, cur.columnNumber() + 1);
-
-    // Emit selectionChanged when a selection exists
     if (cur.hasSelection()) {
-        QTextCursor start = cur;
-        start.setPosition(cur.selectionStart());
-        QTextCursor end = cur;
-        end.setPosition(cur.selectionEnd());
+        QTextCursor s = cur; s.setPosition(cur.selectionStart());
+        QTextCursor e = cur; e.setPosition(cur.selectionEnd());
         emit q_ptr->selectionChanged(
-            start.blockNumber() + 1, start.columnNumber() + 1,
-            end.blockNumber()   + 1, end.columnNumber()   + 1);
+            s.blockNumber()+1, s.columnNumber()+1,
+            e.blockNumber()+1, e.columnNumber()+1);
     }
 }
 
-void CodeEditorPrivate::onTextChanged() {
-    emit q_ptr->textChanged();
-}
+void CodeEditorPrivate::onTextChanged() { emit q_ptr->textChanged(); }
 
-void CodeEditorPrivate::onGutterFoldClicked(int line, bool /*folded*/) {
+void CodeEditorPrivate::onGutterFoldClicked(int line, bool /*folded*/)
+{
+    // GutterWidget uses 1-based lines; FoldManager uses 0-based
     m_foldManager->toggleFold(qMax(0, line - 1));
-    updateGutterFoldRanges();
-    m_gutter->update();
+    // foldStateChanged signal → updateGutterFoldRanges + viewport update
 }
 
+void CodeEditorPrivate::updateFunctionList()
+{
+    TreeSitterHelper helper(m_editor->toPlainText());
+    m_functionPopup->clear();
+    for (const auto& func : helper.functions)
+        m_functionPopup->addFunction(func.signature, func.startLine + 1);
+}
 
-// =======================
-// CodeEditor Public API
-// =======================
+void CodeEditorPrivate::onFunctionSelected(int line)
+{
+    q_ptr->goToLine(line);
+    emit q_ptr->functionSelected(line);
+}
 
-CodeEditor::CodeEditor(QWidget* parent) : QWidget(parent), d_ptr(new CodeEditorPrivate(this, this)) {
+// ── CodeEditor Public API ─────────────────────────────────────────────────────
+
+CodeEditor::CodeEditor(QWidget* parent)
+    : QWidget(parent), d_ptr(new CodeEditorPrivate(this, this))
+{
     d_ptr->updateCurrentLineHighlight();
 }
 
@@ -751,13 +614,7 @@ CodeEditor::~CodeEditor() = default;
 void CodeEditor::setText(const QString& text) {
     d_ptr->m_editor->setPlainText(text);
     applyEditorStyle(d_ptr->m_editor);
-    
-    if (d_ptr->m_highlighter) {
-        d_ptr->m_highlighter->rehighlight();
-    }
-    
-    // New content may have a different line count — refresh gutter immediately
-    // and then once more after the viewport has finished its layout pass.
+    if (d_ptr->m_highlighter) d_ptr->m_highlighter->rehighlight();
     d_ptr->m_gutter->updateWidth();
     d_ptr->m_gutter->update();
     QTimer::singleShot(0, this, [this]() {
@@ -766,9 +623,7 @@ void CodeEditor::setText(const QString& text) {
     });
 }
 
-QString CodeEditor::text() const {
-    return d_ptr->m_editor->toPlainText();
-}
+QString CodeEditor::text() const { return d_ptr->m_editor->toPlainText(); }
 
 void CodeEditor::insertText(const QString& text) {
     QTextCursor tc = d_ptr->m_editor->textCursor();
@@ -776,9 +631,7 @@ void CodeEditor::insertText(const QString& text) {
     d_ptr->m_editor->setTextCursor(tc);
 }
 
-void CodeEditor::clear() {
-    d_ptr->m_editor->clear();
-}
+void CodeEditor::clear() { d_ptr->m_editor->clear(); }
 
 bool CodeEditor::loadFile(const QString& filePath) {
     QFile f(filePath);
@@ -799,72 +652,48 @@ bool CodeEditor::saveFile(const QString& filePath) {
 void CodeEditor::setTheme(const QEditorTheme& theme) {
     Q_D(CodeEditor);
     d->m_theme = theme;
-
-    // Build the editor font with Zed-like rendering quality
     QFont editorFont(theme.fontFamily, theme.fontSize);
     editorFont.setFixedPitch(true);
     editorFont.setStyleHint(QFont::Monospace);
     editorFont.setHintingPreference(QFont::PreferFullHinting);
     editorFont.setLetterSpacing(QFont::PercentageSpacing, 100);
     d->m_editor->setFont(editorFont);
-
-    // Set document margin (like VSCode/Zed left gutter padding in text area)
     d->m_editor->document()->setDocumentMargin(6);
-
     QPalette pal = d->m_editor->palette();
-    pal.setColor(QPalette::Base, theme.background);
-    pal.setColor(QPalette::Text, theme.foreground);
-    pal.setColor(QPalette::Highlight, theme.selectionBackground);
-    pal.setColor(QPalette::HighlightedText, theme.selectionForeground);
+    pal.setColor(QPalette::Base,             theme.background);
+    pal.setColor(QPalette::Text,             theme.foreground);
+    pal.setColor(QPalette::Highlight,        theme.selectionBackground);
+    pal.setColor(QPalette::HighlightedText,  theme.selectionForeground);
     d->m_editor->setPalette(pal);
-
     d->m_gutter->setTheme(theme);
     if (d->m_highlighter) {
         d->m_highlighter->set_format_map(generateFormatMap(theme));
         d->m_highlighter->set_rainbow_colors(theme.rainbowColors);
     }
-    // Re-apply line height after font change (font metrics affect block layout)
     applyEditorStyle(d->m_editor);
-    
-    if (d->m_highlighter) {
-        d->m_highlighter->rehighlight();
-    }
+    if (d->m_highlighter) d->m_highlighter->rehighlight();
     d->updateLineNumberAreaWidth(0);
     d->updateCurrentLineHighlight();
-    if (d->m_completer)
-        d->m_completer->setPopupTheme(theme);
-    if (d->m_functionPopup)
-        d->m_functionPopup->setTheme(theme);
+    if (d->m_completer)      d->m_completer->setPopupTheme(theme);
+    if (d->m_functionPopup)  d->m_functionPopup->setTheme(theme);
 }
 
-void CodeEditor::setThemeFromFile(const QString& jsonPath) {
-    setTheme(QEditorTheme::fromJsonFile(jsonPath));
-}
-
-QEditorTheme CodeEditor::theme() const {
-    return d_ptr->m_theme;
-}
-
-void CodeEditor::setEditorFont(const QFont& font) {
-    d_ptr->m_editor->setFont(font);
-}
-
-QFont CodeEditor::editorFont() const {
-    return d_ptr->m_editor->font();
-}
+void CodeEditor::setThemeFromFile(const QString& jsonPath) { setTheme(QEditorTheme::fromJsonFile(jsonPath)); }
+QEditorTheme CodeEditor::theme() const { return d_ptr->m_theme; }
+void CodeEditor::setEditorFont(const QFont& font) { d_ptr->m_editor->setFont(font); }
+QFont CodeEditor::editorFont() const { return d_ptr->m_editor->font(); }
 
 void CodeEditor::setLineNumbersVisible(bool visible) {
     d_ptr->m_gutter->setLineNumbersVisible(visible);
     d_ptr->updateLineNumberAreaWidth(0);
 }
 
-void CodeEditor::setMiniMapVisible(bool visible) {
-    // Stub
-}
+void CodeEditor::setMiniMapVisible(bool /*visible*/) { /* stub */ }
 
 void CodeEditor::setFoldingEnabled(bool enabled) {
     d_ptr->m_gutter->setFoldingVisible(enabled);
     d_ptr->updateLineNumberAreaWidth(0);
+    d_ptr->setFoldingEnabled(enabled);
 }
 
 void CodeEditor::setAutoCompleteEnabled(bool enabled) {
@@ -875,104 +704,90 @@ void CodeEditor::setAutoCompleteEnabled(bool enabled) {
             d_ptr->m_completer->setPopupTheme(d_ptr->m_theme);
         }
     } else {
-        if (d_ptr->m_completer) {
-            d_ptr->m_completer->deleteLater();
-            d_ptr->m_completer = nullptr;
-        }
+        if (d_ptr->m_completer) { d_ptr->m_completer->deleteLater(); d_ptr->m_completer = nullptr; }
     }
 }
 
-void CodeEditor::setAutoIndentEnabled(bool enabled) {
-    d_ptr->m_autoIndent = enabled;
-}
-
-void CodeEditor::setAutoBracketEnabled(bool enabled) {
-    d_ptr->m_autoBracket = enabled;
-}
-
+void CodeEditor::setAutoIndentEnabled (bool e) { d_ptr->m_autoIndent  = e; }
+void CodeEditor::setAutoBracketEnabled(bool e) { d_ptr->m_autoBracket = e; }
 void CodeEditor::setWordWrap(bool enabled) {
     d_ptr->m_editor->setLineWrapMode(enabled ? QPlainTextEdit::WidgetWidth : QPlainTextEdit::NoWrap);
 }
-
 void CodeEditor::setShowWhitespace(bool visible) {
     QTextOption opt = d_ptr->m_editor->document()->defaultTextOption();
-    if (visible)
-        opt.setFlags(QTextOption::ShowTabsAndSpaces | QTextOption::ShowLineAndParagraphSeparators);
-    else
-        opt.setFlags(QTextOption::Flags());
+    opt.setFlags(visible
+                     ? QTextOption::ShowTabsAndSpaces | QTextOption::ShowLineAndParagraphSeparators
+                     : QTextOption::Flags());
     d_ptr->m_editor->document()->setDefaultTextOption(opt);
 }
-
 void CodeEditor::setTabWidth(int spaces) {
     d_ptr->m_tabWidth = spaces;
-    d_ptr->m_editor->setTabStopDistance(QFontMetricsF(d_ptr->m_editor->font()).horizontalAdvance(' ') * spaces);
+    d_ptr->m_editor->setTabStopDistance(
+        QFontMetricsF(d_ptr->m_editor->font()).horizontalAdvance(' ') * spaces);
 }
-
-void CodeEditor::setInsertSpacesOnTab(bool spaces) {
-    d_ptr->m_insertSpaces = spaces;
-}
+void CodeEditor::setInsertSpacesOnTab(bool spaces) { d_ptr->m_insertSpaces = spaces; }
 
 void CodeEditor::addGutterIcon(int line, GutterIconType type, const QString& tooltip) {
-    int blockNum = qMax(0, line - 1);
-    GutterIconInfo info{type, tooltip, nullptr};
-    d_ptr->m_icons[blockNum] = info;
+    d_ptr->m_icons[qMax(0, line-1)] = {type, tooltip, nullptr};
     d_ptr->m_gutter->setIconMap(d_ptr->m_icons);
 }
-
 void CodeEditor::removeGutterIcon(int line) {
-    d_ptr->m_icons.remove(qMax(0, line - 1));
+    d_ptr->m_icons.remove(qMax(0, line-1));
     d_ptr->m_gutter->setIconMap(d_ptr->m_icons);
 }
-
 void CodeEditor::clearGutterIcons() {
     d_ptr->m_icons.clear();
     d_ptr->m_gutter->setIconMap(d_ptr->m_icons);
 }
 
+// ── Folding public API ────────────────────────────────────────────────────────
+
 void CodeEditor::foldLine(int line) {
-    if (!d_ptr->m_foldManager->isFolded(line - 1)) {
-        d_ptr->m_foldManager->toggleFold(line - 1);
-        d_ptr->updateGutterFoldRanges();
+    // isFolded means: is a fold header AND collapsed.
+    // We want to fold if the header exists and is not yet collapsed.
+    int blockNum = line - 1;
+    if (d_ptr->m_foldManager->foldRanges().contains(blockNum)
+        && !d_ptr->m_foldManager->isFolded(blockNum))
+    {
+        d_ptr->m_foldManager->toggleFold(blockNum);
     }
 }
+
 void CodeEditor::unfoldLine(int line) {
-    if (d_ptr->m_foldManager->isFolded(line - 1)) {
-        d_ptr->m_foldManager->toggleFold(line - 1);
-        d_ptr->updateGutterFoldRanges();
-    }
-}
-void CodeEditor::foldAll() {
-    d_ptr->m_foldManager->foldAll();
-    d_ptr->updateGutterFoldRanges();
-}
-void CodeEditor::unfoldAll() {
-    d_ptr->m_foldManager->unfoldAll();
-    d_ptr->updateGutterFoldRanges();
+    int blockNum = line - 1;
+    if (d_ptr->m_foldManager->isFolded(blockNum))
+        d_ptr->m_foldManager->toggleFold(blockNum);
 }
 
-void CodeEditor::showSearchBar() { }
-void CodeEditor::hideSearchBar() { }
+void CodeEditor::foldAll()   { d_ptr->m_foldManager->foldAll();   }
+void CodeEditor::unfoldAll() { d_ptr->m_foldManager->unfoldAll(); }
 
-static void highlightMatches(QTextDocument* doc, const QString& term, bool caseSensitive, bool regex,
-                             QList<QTextEdit::ExtraSelection>& selections, const QEditorTheme& theme) {
-    selections.clear();
+// ── Search & replace ──────────────────────────────────────────────────────────
+
+void CodeEditor::showSearchBar() {}
+void CodeEditor::hideSearchBar() {}
+
+static void highlightMatches(QTextDocument* doc, const QString& term,
+                             bool caseSensitive, bool regex,
+                             QList<QTextEdit::ExtraSelection>& sel,
+                             const QEditorTheme& theme)
+{
+    sel.clear();
     if (term.isEmpty()) return;
     QTextDocument::FindFlags flags;
     if (caseSensitive) flags |= QTextDocument::FindCaseSensitively;
-    
     QTextCursor cur(doc);
+    auto mkRE = [&]{ return QRegularExpression(term,
+                                                caseSensitive ? QRegularExpression::NoPatternOption
+                                                              : QRegularExpression::CaseInsensitiveOption); };
     while (!cur.isNull() && !cur.atEnd()) {
-        if (regex) {
-            cur = doc->find(QRegularExpression(term, caseSensitive ? QRegularExpression::NoPatternOption : QRegularExpression::CaseInsensitiveOption), cur);
-        } else {
-            cur = doc->find(term, cur, flags);
-        }
+        cur = regex ? doc->find(mkRE(), cur) : doc->find(term, cur, flags);
         if (!cur.isNull()) {
-            QTextEdit::ExtraSelection sel;
-            sel.format.setBackground(theme.searchHighlightBackground);
-            sel.format.setForeground(theme.searchHighlightForeground);
-            sel.cursor = cur;
-            selections.append(sel);
+            QTextEdit::ExtraSelection s;
+            s.format.setBackground(theme.searchHighlightBackground);
+            s.format.setForeground(theme.searchHighlightForeground);
+            s.cursor = cur;
+            sel.append(s);
         }
     }
 }
@@ -980,91 +795,63 @@ static void highlightMatches(QTextDocument* doc, const QString& term, bool caseS
 int CodeEditor::findNext(const QString& term, bool caseSensitive, bool regex) {
     QTextDocument::FindFlags flags;
     if (caseSensitive) flags |= QTextDocument::FindCaseSensitively;
-    
+    auto mkRE = [&]{ return QRegularExpression(term,
+                                                caseSensitive ? QRegularExpression::NoPatternOption
+                                                              : QRegularExpression::CaseInsensitiveOption); };
     QTextCursor cur = d_ptr->m_editor->textCursor();
-    QTextCursor match;
-    if (regex) {
-        match = d_ptr->m_editor->document()->find(QRegularExpression(term, caseSensitive ? QRegularExpression::NoPatternOption : QRegularExpression::CaseInsensitiveOption), cur);
-    } else {
-        match = d_ptr->m_editor->document()->find(term, cur, flags);
-    }
-
-    // Wrap around
+    QTextCursor match = regex ? d_ptr->m_editor->document()->find(mkRE(), cur)
+                              : d_ptr->m_editor->document()->find(term, cur, flags);
     if (match.isNull()) {
         cur.movePosition(QTextCursor::Start);
-        if (regex) {
-            match = d_ptr->m_editor->document()->find(QRegularExpression(term, caseSensitive ? QRegularExpression::NoPatternOption : QRegularExpression::CaseInsensitiveOption), cur);
-        } else {
-            match = d_ptr->m_editor->document()->find(term, cur, flags);
-        }
+        match = regex ? d_ptr->m_editor->document()->find(mkRE(), cur)
+                      : d_ptr->m_editor->document()->find(term, cur, flags);
     }
-
-    highlightMatches(d_ptr->m_editor->document(), term, caseSensitive, regex, d_ptr->m_searchSelections, d_ptr->m_theme);
+    highlightMatches(d_ptr->m_editor->document(), term, caseSensitive, regex,
+                     d_ptr->m_searchSelections, d_ptr->m_theme);
     d_ptr->updateCurrentLineHighlight();
-
-    if (!match.isNull()) {
-        d_ptr->m_editor->setTextCursor(match);
-        d_ptr->m_editor->centerCursor();
-        return match.selectionStart();
-    }
+    if (!match.isNull()) { d_ptr->m_editor->setTextCursor(match); d_ptr->m_editor->centerCursor(); return match.selectionStart(); }
     return -1;
 }
 
 int CodeEditor::findPrev(const QString& term, bool caseSensitive, bool regex) {
     QTextDocument::FindFlags flags = QTextDocument::FindBackward;
     if (caseSensitive) flags |= QTextDocument::FindCaseSensitively;
-    
+    auto mkRE = [&]{ return QRegularExpression(term,
+                                                caseSensitive ? QRegularExpression::NoPatternOption
+                                                              : QRegularExpression::CaseInsensitiveOption); };
     QTextCursor cur = d_ptr->m_editor->textCursor();
-    QTextCursor match;
-    if (regex) {
-        match = d_ptr->m_editor->document()->find(QRegularExpression(term, caseSensitive ? QRegularExpression::NoPatternOption : QRegularExpression::CaseInsensitiveOption), cur,  QTextDocument::FindBackward);
-    } else {
-        match = d_ptr->m_editor->document()->find(term, cur, flags);
-    }
-
-    // Wrap around
+    QTextCursor match = regex ? d_ptr->m_editor->document()->find(mkRE(), cur, QTextDocument::FindBackward)
+                              : d_ptr->m_editor->document()->find(term, cur, flags);
     if (match.isNull()) {
         cur.movePosition(QTextCursor::End);
-        if (regex) {
-            match = d_ptr->m_editor->document()->find(QRegularExpression(term, caseSensitive ? QRegularExpression::NoPatternOption : QRegularExpression::CaseInsensitiveOption), cur, QTextDocument::FindBackward);
-        } else {
-            match = d_ptr->m_editor->document()->find(term, cur, flags);
-        }
+        match = regex ? d_ptr->m_editor->document()->find(mkRE(), cur, QTextDocument::FindBackward)
+                      : d_ptr->m_editor->document()->find(term, cur, flags);
     }
-
-    highlightMatches(d_ptr->m_editor->document(), term, caseSensitive, regex, d_ptr->m_searchSelections, d_ptr->m_theme);
+    highlightMatches(d_ptr->m_editor->document(), term, caseSensitive, regex,
+                     d_ptr->m_searchSelections, d_ptr->m_theme);
     d_ptr->updateCurrentLineHighlight();
-
-    if (!match.isNull()) {
-        d_ptr->m_editor->setTextCursor(match);
-        d_ptr->m_editor->centerCursor();
-        return match.selectionStart();
-    }
+    if (!match.isNull()) { d_ptr->m_editor->setTextCursor(match); d_ptr->m_editor->centerCursor(); return match.selectionStart(); }
     return -1;
 }
 
 void CodeEditor::replaceNext(const QString& term, const QString& replacement) {
-    if (d_ptr->m_editor->textCursor().hasSelection() && d_ptr->m_editor->textCursor().selectedText() == term) {
+    if (d_ptr->m_editor->textCursor().hasSelection()
+        && d_ptr->m_editor->textCursor().selectedText() == term)
         d_ptr->m_editor->textCursor().insertText(replacement);
-    }
     findNext(term, true, false);
 }
 
 void CodeEditor::replaceAll(const QString& term, const QString& replacement) {
     QTextCursor cur(d_ptr->m_editor->document());
     cur.beginEditBlock();
-    int count = 0;
-    while (!(cur = d_ptr->m_editor->document()->find(term, cur)).isNull()) {
+    while (!(cur = d_ptr->m_editor->document()->find(term, cur)).isNull())
         cur.insertText(replacement);
-        count++;
-    }
     cur.endEditBlock();
-    findNext(term, true, false); // refresh highlights
+    findNext(term, true, false);
 }
 
 void CodeEditor::goToLine(int line) {
-    QTextDocument* doc = d_ptr->m_editor->document();
-    QTextBlock block = doc->findBlockByNumber(qMax(0, line - 1));
+    QTextBlock block = d_ptr->m_editor->document()->findBlockByNumber(qMax(0, line-1));
     if (block.isValid()) {
         QTextCursor cursor(block);
         d_ptr->m_editor->setTextCursor(cursor);
@@ -1072,91 +859,41 @@ void CodeEditor::goToLine(int line) {
     }
 }
 
-int CodeEditor::currentLine() const {
-    return d_ptr->m_editor->textCursor().blockNumber() + 1;
-}
+int     CodeEditor::currentLine()   const { return d_ptr->m_editor->textCursor().blockNumber() + 1; }
+int     CodeEditor::currentColumn() const { return d_ptr->m_editor->textCursor().columnNumber() + 1; }
+QString CodeEditor::selectedText()  const { return d_ptr->m_editor->textCursor().selectedText(); }
+void    CodeEditor::selectAll()           { d_ptr->m_editor->selectAll(); }
 
-int CodeEditor::currentColumn() const {
-    return d_ptr->m_editor->textCursor().columnNumber() + 1;
-}
-
-QString CodeEditor::selectedText() const {
-    return d_ptr->m_editor->textCursor().selectedText();
-}
-
-void CodeEditor::selectAll() {
-    d_ptr->m_editor->selectAll();
-}
-
-void CodeEditor::setCustomKeywords(const QStringList& keywords) {
-    if (d_ptr->m_completer)
-        d_ptr->m_completer->setCustomKeywords(keywords);
-}
-
-void CodeEditor::addCustomKeyword(const QString& keyword) {
-    if (d_ptr->m_completer)
-        d_ptr->m_completer->addCustomKeyword(keyword);
-}
-void CodeEditor::setReadOnly(bool readOnly) { d_ptr->m_editor->setReadOnly(readOnly); }
-bool CodeEditor::isReadOnly() const { return d_ptr->m_editor->isReadOnly(); }
+void CodeEditor::setCustomKeywords(const QStringList& kw) { if (d_ptr->m_completer) d_ptr->m_completer->setCustomKeywords(kw); }
+void CodeEditor::addCustomKeyword (const QString& kw)     { if (d_ptr->m_completer) d_ptr->m_completer->addCustomKeyword(kw); }
+void CodeEditor::setReadOnly(bool r) { d_ptr->m_editor->setReadOnly(r); }
+bool CodeEditor::isReadOnly() const  { return d_ptr->m_editor->isReadOnly(); }
 
 void CodeEditor::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
     d_ptr->updateLineNumberAreaWidth(0);
 }
 
-// Add to QCodeEngine_C/src/CodeEditor.cpp
-
-void CodeEditorPrivate::updateFunctionList()
-{
-    // Extract functions from current document
-    TreeSitterHelper helper(m_editor->toPlainText());
-    
-    m_functionPopup->clear();
-    
-    // Iterate over functions and populate popup
-    for (const auto &func : helper.functions) {
-        // func.signature contains the function signature
-        // func.startLine contains the line number (0-based)
-        m_functionPopup->addFunction(func.signature, func.startLine + 1);  // +1 for 1-based
-    }
-}
-
-void CodeEditorPrivate::onFunctionSelected(int line)
-{
-    // Jump to selected function
-    q_ptr->goToLine(line);
-    
-    // Emit public signal
-    emit q_ptr->functionSelected(line);
-}
-
-// Add to QCodeEngine_C/src/CodeEditor.cpp
+// ── Function list popup ───────────────────────────────────────────────────────
 
 void CodeEditor::showFunctionList()
 {
-    if (d_ptr->m_functionPopup && d_ptr->m_functionPopup->isEmpty()) {
+    if (d_ptr->m_functionPopup && d_ptr->m_functionPopup->isEmpty())
         d_ptr->updateFunctionList();
-    }
-    
-    if (d_ptr->m_functionPopup) {
+    if (d_ptr->m_functionPopup)
         d_ptr->m_functionPopup->showBelowWidget(this);
-    }
 }
 
 QVector<CodeEditor::FunctionInfo> CodeEditor::getFunctionList() const
 {
     QVector<FunctionInfo> result;
-    
     TreeSitterHelper helper(d_ptr->m_editor->toPlainText());
-    
-    for (const auto &func : helper.functions) {
+    for (const auto& func : helper.functions) {
         FunctionInfo info;
-        info.name = func.signature.split('(').first().trimmed();  // Extract function name
-        info.signature = func.signature;
-        info.lineNumber = func.startLine + 1;  // Convert to 1-based
+        info.name       = func.signature.split('(').first().trimmed();
+        info.signature  = func.signature;
+        info.lineNumber = func.startLine + 1;
         result.append(info);
     }
-    
     return result;
 }
