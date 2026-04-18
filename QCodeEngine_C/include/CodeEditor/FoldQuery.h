@@ -42,23 +42,69 @@ public:
     // Canonical fold scheme for C — single source of truth.
     // FoldManager and unit tests both reference this constant; the dead
     // c_folds.scm in the QRC can be removed or replaced with a #include.
-    static constexpr const char* FOLD_SCHEME = R"SCHEME(
+    //Default 1st with error on else
+    // static constexpr const char* FOLD_SCHEME = R"SCHEME(
+// ; Compound blocks: function bodies, if/for/while/switch/do
+// (compound_statement) @fold
+
+// ; Struct / union / enum bodies
+// (struct_specifier  body: (field_declaration_list) @fold)
+// (union_specifier   body: (field_declaration_list) @fold)
+// (enum_specifier    body: (enumerator_list)        @fold)
+
+// ; Block comments  /* ... */
+// (comment) @fold
+
+// ; Preprocessor conditional blocks
+// (preproc_ifdef) @fold
+// (preproc_if)    @fold
+// (preproc_elif)  @fold
+// )SCHEME";
+
+    //claude
+   static constexpr const char* FOLD_SCHEME = R"SCHEME(
 ; Compound blocks: function bodies, if/for/while/switch/do
 (compound_statement) @fold
-
 ; Struct / union / enum bodies
 (struct_specifier  body: (field_declaration_list) @fold)
 (union_specifier   body: (field_declaration_list) @fold)
 (enum_specifier    body: (enumerator_list)        @fold)
-
 ; Block comments  /* ... */
 (comment) @fold
-
-; Preprocessor conditional blocks
+; Preprocessor conditional blocks.
+; NOTE: preproc_elif_clause is intentionally NOT listed here.
+;       It is emitted by the C++ chain helper while recursing through
+;       alternatives — querying it directly would cause duplicate ranges.
 (preproc_ifdef) @fold
 (preproc_if)    @fold
-(preproc_elif)  @fold
+(initializer_list) @fold
+(gnu_asm_expression) @fold
+(preproc_function_def) @fold
+(parenthesized_expression) @fold
+(return_statement) @fold
 )SCHEME";
+
+// // Arena Ai
+//     static constexpr const char* FOLD_SCHEME = R"SCHEME(
+// ; Compound blocks
+// (compound_statement) @fold
+
+// ; Struct / union / enum bodies
+// (struct_specifier  body: (field_declaration_list) @fold)
+// (union_specifier   body: (field_declaration_list) @fold)
+// (enum_specifier    body: (enumerator_list)        @fold)
+
+// ; Block comments
+// (comment) @fold
+
+// ; Preprocessor: fold #else and #elif as independent regions FIRST,
+// ; then fold #if and #ifdef but their range will be trimmed in post-processing.
+// (preproc_else)  @fold
+// (preproc_elif)  @fold
+// (preproc_if)    @fold
+// (preproc_ifdef) @fold
+// )SCHEME";
+
 
     explicit FoldQuery(const TSLanguage* lang,
                        const QByteArray& schemeSrc = QByteArray(FOLD_SCHEME));
