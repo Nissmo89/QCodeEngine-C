@@ -9,6 +9,7 @@
 #include "TreeSitterHighlighter.h"
 #include "AutoCompleter.h"
 #include "treesitterhelper.h"
+#include "CodeEditor/LineHighlighter.h"
 
 // Forward declarations for future stages
 // class QSyntaxHighlighter_TS;
@@ -73,9 +74,11 @@ public:
 
     QList<QTextEdit::ExtraSelection> m_bracketSelections;
     QList<QTextEdit::ExtraSelection> m_searchSelections;
+    QList<QTextEdit::ExtraSelection> m_lineHighlightSelections;
 
     // Future components
-    TreeSitterHighlighter* m_highlighter = nullptr;
+    TreeSitterHighlighter* m_highlighter    = nullptr;
+    LineHighlighter*       m_lineHighlighter = nullptr;
     AutoCompleter* m_completer = nullptr;
     // QMiniMap* m_miniMap = nullptr;
     // QSearchBar* m_searchBar = nullptr;

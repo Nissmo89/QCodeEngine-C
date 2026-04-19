@@ -42,6 +42,9 @@ add_library(QCodeEngine_C
     src/functionlistpopup.h
     src/FoldQuery.cpp
     src/FoldQuery.cpp
+    include/CodeEditor/FindReplaceBar.h
+    include/CodeEditor/LineHighlighter.h
+    src/LineHighlighter.cpp
 )
 
 

@@ -175,7 +175,87 @@ void InnerEditor::keyPressEvent(QKeyEvent* e) {
 }
 
 void InnerEditor::paintEvent(QPaintEvent* e) {
-    QPlainTextEdit::paintEvent(e);
+    // ── Preserve syntax colors under selection ────────────────────────────────
+    //
+    // Qt's QTextDocumentLayout replaces every character's foreground with
+    // QPalette::HighlightedText for selected ranges — wiping out all syntax
+    // highlight colors.  The fix:
+    //
+    //   1. Temporarily clear the cursor selection before the base paint.
+    //      Qt now renders all text with their real QTextCharFormat colors.
+    //   2. Restore the real cursor (no repaint triggered — we're already inside
+    //      paintEvent, so no recursive call occurs).
+    //   3. Manually paint a semi-transparent selection rectangle on top as a
+    //      QPainter overlay — gives the blue selection wash without clobbering
+    //      any foreground color.
+    //
+    // This is the same technique used by Qt Creator and Kate.
+
+    const QTextCursor savedCursor = textCursor();
+
+    if (savedCursor.hasSelection()) {
+        // Step 1: paint text without selection (full syntax colors preserved)
+        QTextCursor blank = savedCursor;
+        blank.clearSelection();
+        setTextCursor(blank);           // does NOT repaint inside paintEvent
+        QPlainTextEdit::paintEvent(e);
+        setTextCursor(savedCursor);     // restore — also no repaint here
+
+        // Step 3: draw selection background as semi-transparent overlay
+        QPainter painter(viewport());
+        painter.setRenderHint(QPainter::Antialiasing, false);
+
+        // Selection color: use the palette highlight but force a comfortable alpha
+        QColor selColor = palette().color(QPalette::Highlight);
+        selColor.setAlpha(100);         // ~40 % — adjust to taste
+        painter.setBrush(selColor);
+        painter.setPen(Qt::NoPen);
+
+        const int selStart = savedCursor.selectionStart();
+        const int selEnd   = savedCursor.selectionEnd();
+
+        // Walk visible blocks and shade any that overlap the selection
+        QTextBlock block = firstVisibleBlock();
+        qreal top    = blockBoundingGeometry(block).translated(contentOffset()).top();
+        qreal bottom = top + blockBoundingRect(block).height();
+        const int vpWidth = viewport()->width();
+
+        while (block.isValid() && top <= e->rect().bottom()) {
+            if (block.isVisible() && bottom >= e->rect().top()) {
+                const int blockStart = block.position();
+                const int blockEnd   = blockStart + block.length() - 1; // excl. \n
+
+                // Does this block overlap [selStart, selEnd)?
+                if (blockStart <= selEnd && blockEnd >= selStart) {
+                    const int overlapStart = qMax(selStart, blockStart);
+                    const int overlapEnd   = qMin(selEnd,   blockEnd);
+
+                    if (overlapStart == blockStart && overlapEnd == blockEnd) {
+                        // Whole line selected — full-width rect
+                        painter.drawRect(QRectF(0, top, vpWidth, bottom - top));
+                    } else {
+                        // Partial line — measure character positions
+                        QTextCursor c1(document());
+                        c1.setPosition(overlapStart);
+                        const QRect r1 = cursorRect(c1);
+
+                        QTextCursor c2(document());
+                        c2.setPosition(overlapEnd);
+                        const QRect r2 = cursorRect(c2);
+
+                        painter.drawRect(QRectF(r1.left(), top,
+                                                r2.right() - r1.left(),
+                                                bottom - top));
+                    }
+                }
+            }
+            block  = block.next();
+            top    = bottom;
+            bottom = top + blockBoundingRect(block).height();
+        }
+    } else {
+        QPlainTextEdit::paintEvent(e);  // no selection — normal path, no overhead
+    }
 
     // Draw " ...}" hint on collapsed fold header lines
     if (!d_ptr->m_foldingEnabled) return;
@@ -263,6 +343,22 @@ CodeEditorPrivate::CodeEditorPrivate(CodeEditor* q, QWidget* parent)
             this, [this](void* treePtr) {
                 if (m_foldingEnabled)
                     m_foldManager->updateFoldRanges(treePtr, m_editor->document());
+            });
+
+    // ── LineHighlighter — notebook-style {N,#COLOR} comment tags ────────────
+    m_lineHighlighter = new LineHighlighter(this);
+    m_lineHighlighter->setDocument(m_editor->document());
+    m_lineHighlighter->setEditor(m_editor);
+    // Borrows the same TSTree* as FoldManager — zero extra parse cost.
+    connect(m_highlighter, &TreeSitterHighlighter::parsed,
+            this, [this](void* treePtr) {
+                m_lineHighlighter->updateFromTree(treePtr, m_editor->document());
+            });
+    // When the highlight map changes, rebuild the merged extra-selection list.
+    connect(m_lineHighlighter, &LineHighlighter::highlightChanged,
+            this, [this]() {
+                m_lineHighlightSelections = m_lineHighlighter->extraSelections();
+                updateCurrentLineHighlight();
             });
 
     // After fold ranges are rebuilt, refresh the gutter arrows
@@ -388,6 +484,9 @@ void CodeEditorPrivate::updateCurrentLineHighlight() {
         sel.cursor.clearSelection();
         extras.append(sel);
     }
+    // Line-highlight selections drawn first (lowest z-order) so bracket
+    // and search highlights paint on top of them.
+    extras.append(m_lineHighlightSelections);
     extras.append(m_bracketSelections);
     extras.append(m_searchSelections);
     m_editor->setExtraSelections(extras);
