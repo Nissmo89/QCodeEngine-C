@@ -66,12 +66,16 @@ class TreeSitterHighlighter: public QObject {
     const FormatMap get_format_map();
     /// Set the colors used for rainbow brackets.
     void set_rainbow_colors(const QList<QColor>& colors);
+    void setPerformanceMode(bool enabled);
+    bool performanceMode() const { return m_performanceMode; }
 
   public slots:
     /// Reparse the whole document.
     void reparse();
     /// Apply syntax highlighting to the whole document.
     void rehighlight();
+    /// Apply highlighting around a specific block range (useful for huge files).
+    void rehighlightAroundBlock(int centerBlock, int radius = 300);
     /// Clear the highlighting of the whole document.
     void clear();
 
@@ -122,6 +126,8 @@ class TreeSitterHighlighter: public QObject {
   private:
     Q_DISABLE_COPY(TreeSitterHighlighter);
     QList<QColor> m_rainbowColors;
+    QString m_sourceCache;
+    bool m_performanceMode = false;
 };
 
 #endif

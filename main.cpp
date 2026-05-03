@@ -5,8 +5,6 @@
 #include <QMenu>
 #include <QAction>
 #include <QFileDialog>
-#include <QFile>
-#include <QTextStream>
 #include <QMessageBox>
 #include <CodeEditor/CodeEditor.h>
 #include <CodeEditor/EditorTheme.h>
@@ -40,27 +38,13 @@ int main(int argc, char* argv[]) {
     QObject::connect(openAction, &QAction::triggered, [&mainWindow, editor]() {
         QString fileName = QFileDialog::getOpenFileName(&mainWindow, "Open File", "", "All Files (*)");
         if (!fileName.isEmpty()) {
-            QFile file(fileName);
-            if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-                QTextStream in(&file);
-                editor->setText(in.readAll());
-                file.close();
-            } else {
+            if (!editor->loadFile(fileName)) {
                 QMessageBox::warning(&mainWindow, "Error", "Could not open file.");
             }
         }
     });
 
-    // ✅ FIXED: Show function list
-    editor->showFunctionList();
-
-    // ✅ FIXED: Get function list programmatically
-    auto functions = editor->getFunctionList();
-    for (const auto &func : functions) {
-        qDebug() << func.name << "at line" << func.lineNumber;
-    }
-
-    // ✅ FIXED: Connect to function selection - Use QObject:: scope or change & to *
+    // Optional: observe function-jump events from Ctrl+Shift+O popup.
     QObject::connect(editor, &CodeEditor::functionSelected, [](int line) {
         qDebug() << "Jumped to line" << line;
     });

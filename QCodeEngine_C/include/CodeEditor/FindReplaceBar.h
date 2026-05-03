@@ -18,6 +18,8 @@
 #include <QRegularExpression>
 #include <QTimer>
 #include <QGraphicsOpacityEffect>
+#include <functional>
+#include <utility>
 #include "CodeEditor/EditorTheme.h"
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -197,6 +199,19 @@ public:
         update();
     }
 
+    void setHighlightsHandler(std::function<void(const QList<QTextEdit::ExtraSelection>&)> handler) {
+        m_highlightsHandler = std::move(handler);
+    }
+
+    // 0 disables limit. Useful for very large files to avoid UI stalls.
+    void setHighlightAllLimit(int maxHighlights) {
+        const int next = qMax(0, maxHighlights);
+        if (m_maxHighlights == next)
+            return;
+        m_maxHighlights = next;
+        doHighlightAll();
+    }
+
     // Open the bar in Find-only or Find+Replace mode.
     // Pre-fills the find field with the editor's current selection if any.
     void openFind() {
@@ -207,6 +222,10 @@ public:
     void openFindReplace() {
         setReplaceVisible(true);
         openBar();
+    }
+
+    void closeFindBar() {
+        closeBar();
     }
 
     qreal opacity() const {
@@ -313,6 +332,7 @@ private slots:
         QTextDocument *doc = m_editor->document();
         QTextCursor   cur(doc);
         QTextDocument::FindFlags flags = buildFindFlags(false);
+        m_highlightsTruncated = false;
         int count = 0, currentIndex = 0;
         QTextCursor editorCursor = m_editor->textCursor();
 
@@ -320,6 +340,11 @@ private slots:
             cur = findIn(doc, needle, cur, flags);
             if (cur.isNull()) break;
             ++count;
+
+            if (m_maxHighlights > 0 && highlights.size() >= m_maxHighlights) {
+                m_highlightsTruncated = true;
+                break;
+            }
 
             // Track which match the editor cursor is inside
             if (cur.selectionStart() <= editorCursor.position() &&
@@ -333,6 +358,8 @@ private slots:
             highlights.append(sel);
         }
 
+        currentIndex = qMin(currentIndex, highlights.size());
+
         // Current-match highlight (brighter)
         if (currentIndex > 0) {
             QColor cur2 = m_theme.tokenKeyword.isValid()
@@ -341,7 +368,8 @@ private slots:
             highlights[currentIndex - 1].format.setBackground(cur2);
         }
 
-        m_editor->setExtraSelections(highlights);
+        if (m_highlightsHandler)
+            m_highlightsHandler(highlights);
         m_savedHighlights = highlights;
         m_currentMatch    = currentIndex;
         m_totalMatches    = count;
@@ -645,19 +673,23 @@ private:
     }
 
     void clearHighlights() {
-        if (m_editor)
-            m_editor->setExtraSelections({});
+        if (m_highlightsHandler)
+            m_highlightsHandler({});
         m_savedHighlights.clear();
         m_totalMatches = 0;
         m_currentMatch = 0;
+        m_highlightsTruncated = false;
     }
 
     void updateMatchLabel() {
         if (m_totalMatches == 0)
             m_matchLabel->setText(m_findEdit->text().isEmpty() ? "" : "No results");
         else
-            m_matchLabel->setText(
-                QString("%1 / %2").arg(m_currentMatch).arg(m_totalMatches));
+            m_matchLabel->setText(QString("%1 / %2")
+                                      .arg(m_currentMatch)
+                                      .arg(m_highlightsTruncated
+                                               ? QString("%1+").arg(qMax(1, m_totalMatches - 1))
+                                               : QString::number(m_totalMatches)));
     }
 
     // ── Core find logic (mirrors QFindDialogs internals) ─────────────────────
@@ -757,6 +789,9 @@ private:
     QList<QTextEdit::ExtraSelection> m_savedHighlights;
     int m_currentMatch = 0;
     int m_totalMatches = 0;
+    int m_maxHighlights = 0;
+    bool m_highlightsTruncated = false;
+    std::function<void(const QList<QTextEdit::ExtraSelection>&)> m_highlightsHandler;
 };
 
 #endif // FINDREPLACEBAR_H

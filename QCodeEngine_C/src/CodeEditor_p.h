@@ -2,14 +2,18 @@
 #include <QPlainTextEdit>
 #include <QMap>
 #include <QTimer>
+#include <QThread>
 #include "CodeEditor/CodeEditor.h"
 #include "CodeEditor/GutterWidget.h"
+#include "CodeEditor/diagnosticmanager.h"
 #include "FoldManager.h"
 #include <QTextBlock>
 #include "TreeSitterHighlighter.h"
 #include "AutoCompleter.h"
+#include "syntaxerrordetector.h"
 #include "treesitterhelper.h"
 #include "CodeEditor/LineHighlighter.h"
+#include "CodeEditor/FindReplaceBar.h"
 
 // Forward declarations for future stages
 // class QSyntaxHighlighter_TS;
@@ -18,6 +22,7 @@
 // class QSearchBar;
 
 class CodeEditorPrivate;
+struct LargeFileState;
 
 class InnerEditor : public QPlainTextEdit {
     Q_OBJECT
@@ -69,8 +74,25 @@ public:
     bool m_autoBracket     = true;
     bool m_autoIndent      = true;
     bool m_foldingEnabled  = false;
+    bool m_miniMapVisibleRequested = false;
+    bool m_largeFileMode = false;
+    bool m_largeDocumentMode = false;
+    bool m_savedReadOnly = false;
+    bool m_asyncLoadInProgress = false;
+    bool m_heavyFeaturesSuspended = false;
+
+    QString m_lastSearchTerm;
+    bool m_lastSearchCaseSensitive = false;
+    bool m_lastSearchRegex = false;
+    QString m_asyncLoadedText;
+    QString m_asyncLoadedPath;
+    qint64 m_asyncLoadedBytes = 0;
+    qsizetype m_asyncLoadOffset = 0;
+    int m_asyncLoadGeneration = 0;
 
     QTimer* m_functionListTimer = nullptr;  // debounces updateFunctionList
+    QTimer* m_largeDocHighlightTimer = nullptr;
+    int m_pendingLargeDocHighlightLine = -1;
 
     QList<QTextEdit::ExtraSelection> m_bracketSelections;
     QList<QTextEdit::ExtraSelection> m_searchSelections;
@@ -81,16 +103,59 @@ public:
     LineHighlighter*       m_lineHighlighter = nullptr;
     AutoCompleter* m_completer = nullptr;
     // QMiniMap* m_miniMap = nullptr;
-    // QSearchBar* m_searchBar = nullptr;
+    FindReplaceBar* m_searchBar = nullptr;
     GutterWidget *m_gutter = nullptr;
 
     // ✅ NEW members
     FloatingListPopup *m_functionPopup = nullptr;
     TreeSitterHelper *m_treeSitterHelper = nullptr;
 
+    DiagnosticManager *m_diagnosticManager;
+    SyntaxErrorDetector *m_syntaxChecker;
+    LargeFileState* m_largeFileState = nullptr;
+    QThread* m_asyncLoadThread = nullptr;
+
+
+
     // ✅ NEW functions
     void updateFunctionList();
     void onFunctionSelected(int line);
+
+
+    void setupLayout();
+    void setupHighlighter();
+    void setupEditorModules();
+    void setupConnections();
+    void setupActions();
+    void onTreeParsed(void* treePtr);
+    void enforceFixedLineHeight(int from, int charsAdded);
+    void onGutterMarkerToggled(int line, MarkerType type);
+    bool shouldUseLargeFileMode(qint64 fileSize) const;
+    bool shouldUseLargeDocumentMode(qint64 sourceBytesHint) const;
+    void applyDocumentPerformanceMode(qint64 sourceBytesHint = -1);
+    bool enterLargeFileMode(const QString& filePath);
+    void exitLargeFileMode();
+    void suspendHeavyEditorFeatures();
+    void resumeHeavyEditorFeatures();
+    void requestLargeFileWindow(qint64 requestedByte, int anchorMode);
+    void applyLargeFileWindow(int requestId, qint64 startByte, qint64 endByte,
+                              const QString& text, int anchorMode);
+    void onLargeFileScroll(int value);
+    void startLargeFileIndexing();
+    int largeFileCurrentLine() const;
+    qint64 largeFileByteForLine(int line) const;
+    bool shouldUseAsyncFullLoad(qint64 fileSize) const;
+    bool startAsyncFileLoad(const QString& filePath);
+    void cancelAsyncFileLoad();
+    void beginChunkedTextApply(QString text, const QString& filePath);
+    void applyNextTextChunk(int generation);
+
+
+
+
+
+
+
 
 private:
 

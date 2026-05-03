@@ -68,6 +68,7 @@ public:
     void setCustomKeywords(const QStringList& keywords);
     void addCustomKeyword(const QString& keyword);
     void setPopupTheme(const QEditorTheme& theme);
+    void setLargeDocumentMode(bool enabled);
 
     // Called by InnerEditor::keyPressEvent — before the base class processes it.
     // Returns true if the event was consumed.
@@ -103,4 +104,5 @@ private:
     // Theme
     QColor m_popupBg, m_popupFg, m_popupBorder, m_popupHlBg, m_popupHlFg;
     bool   m_themeApplied = false;
+    bool   m_largeDocumentMode = false;
 };

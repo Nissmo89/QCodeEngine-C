@@ -228,7 +228,7 @@ AutoCompleter::AutoCompleter(QObject* parent)
         "int8_t", "int16_t", "int32_t", "int64_t",
         "uint8_t", "uint16_t", "uint32_t", "uint64_t",
         "size_t", "ptrdiff_t", "intptr_t", "uintptr_t",
-        "FILE", "NULL",
+        "FILE",
     };
 
     m_rebuildTimer.setSingleShot(true);
@@ -239,16 +239,27 @@ AutoCompleter::AutoCompleter(QObject* parent)
 
 AutoCompleter::~AutoCompleter()
 {
-    // m_popup is a child of the viewport so Qt deletes it automatically
+    if (m_popup) {
+        m_popup->hide();
+        m_popup->deleteLater();
+        m_popup = nullptr;
+    }
 }
 
 // ── Editor attachment ─────────────────────────────────────────────────────────
 
 void AutoCompleter::setEditor(QPlainTextEdit* editor)
 {
+    if (m_editor == editor && m_popup)
+        return;
+
     if (m_editor) {
-        m_editor->viewport()->removeEventFilter(this);
         disconnect(m_editor->document(), nullptr, this, nullptr);
+    }
+    if (m_popup) {
+        m_popup->hide();
+        m_popup->deleteLater();
+        m_popup = nullptr;
     }
 
     m_editor = editor;
@@ -263,11 +274,18 @@ void AutoCompleter::setEditor(QPlainTextEdit* editor)
             this, &AutoCompleter::onCompletionAccepted);
 
     connect(m_editor->document(), &QTextDocument::contentsChanged, this, [this]() {
+        if (m_largeDocumentMode)
+            return;
         m_rebuildTimer.start();
     });
 
     applyThemeToPopup();
-    rebuildDocumentIdentifiers();
+    if (m_largeDocumentMode) {
+        m_wordLastIndex.clear();
+        rebuildEntries();
+    } else {
+        rebuildDocumentIdentifiers();
+    }
 }
 
 // ── Theme ─────────────────────────────────────────────────────────────────────
@@ -320,6 +338,24 @@ void AutoCompleter::addCustomKeyword(const QString& keyword)
     rebuildEntries();
 }
 
+void AutoCompleter::setLargeDocumentMode(bool enabled)
+{
+    if (m_largeDocumentMode == enabled)
+        return;
+
+    m_largeDocumentMode = enabled;
+    m_rebuildTimer.stop();
+
+    if (m_largeDocumentMode) {
+        m_wordLastIndex.clear();
+        rebuildEntries();
+        if (m_popup)
+            m_popup->hide();
+    } else {
+        rebuildDocumentIdentifiers();
+    }
+}
+
 // ── Model building ────────────────────────────────────────────────────────────
 
 void AutoCompleter::refreshModel()
@@ -331,30 +367,33 @@ void AutoCompleter::rebuildEntries()
 {
     m_entries.clear();
 
-    // 1) Document identifiers sorted by recency (most recently seen first)
-    struct DocEntry { QString text; int lastIdx; };
-    QVector<DocEntry> docVec;
-    docVec.reserve(m_wordLastIndex.size());
-
-    for (auto it = m_wordLastIndex.constBegin(); it != m_wordLastIndex.constEnd(); ++it) {
-        const QString& w = it.key();
-        if (w.size() < 2) continue;
-        if (isReservedKeyword(w, m_baseKeywords)) continue;
-        bool customHit = false;
-        for (const QString& c : m_customKeywords)
-            if (c.compare(w, Qt::CaseInsensitive) == 0) { customHit = true; break; }
-        if (customHit) continue;
-        docVec.append({w, it.value()});
-    }
-
-    std::sort(docVec.begin(), docVec.end(), [](const DocEntry& a, const DocEntry& b) {
-        if (a.lastIdx != b.lastIdx) return a.lastIdx > b.lastIdx;
-        return a.text.compare(b.text, Qt::CaseInsensitive) < 0;
-    });
-
     using Kind = CompletionPopup::Kind;
-    for (const DocEntry& e : docVec)
-        m_entries.append({e.text, Kind::DocumentWord});
+
+    if (!m_largeDocumentMode) {
+        // 1) Document identifiers sorted by recency (most recently seen first)
+        struct DocEntry { QString text; int lastIdx; };
+        QVector<DocEntry> docVec;
+        docVec.reserve(m_wordLastIndex.size());
+
+        for (auto it = m_wordLastIndex.constBegin(); it != m_wordLastIndex.constEnd(); ++it) {
+            const QString& w = it.key();
+            if (w.size() < 2) continue;
+            if (isReservedKeyword(w, m_baseKeywords)) continue;
+            bool customHit = false;
+            for (const QString& c : m_customKeywords)
+                if (c.compare(w, Qt::CaseInsensitive) == 0) { customHit = true; break; }
+            if (customHit) continue;
+            docVec.append({w, it.value()});
+        }
+
+        std::sort(docVec.begin(), docVec.end(), [](const DocEntry& a, const DocEntry& b) {
+            if (a.lastIdx != b.lastIdx) return a.lastIdx > b.lastIdx;
+            return a.text.compare(b.text, Qt::CaseInsensitive) < 0;
+        });
+
+        for (const DocEntry& e : docVec)
+            m_entries.append({e.text, Kind::DocumentWord});
+    }
 
     // 2) C keywords, alphabetically
     QStringList kw = m_baseKeywords;
@@ -377,7 +416,7 @@ void AutoCompleter::rebuildEntries()
 
 void AutoCompleter::rebuildDocumentIdentifiers()
 {
-    if (!m_editor || !m_editor->document()) return;
+    if (!m_editor || !m_editor->document() || m_largeDocumentMode) return;
 
     const QString t = m_editor->toPlainText();
     QHash<QString, int> lastIdx;
