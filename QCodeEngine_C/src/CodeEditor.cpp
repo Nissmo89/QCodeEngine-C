@@ -6,13 +6,16 @@
 #include <QFileInfo>
 #include <QTextBlock>
 #include <QPainter>
+#include <QMouseEvent>
 #include <QVector>
+#include <QSet>
 #include <QTimer>
 #include <QScrollBar>
 #include <QSignalBlocker>
 #include <QThread>
 #include <memory>
 #include <algorithm>
+#include <utility>
 #include "TreeSitterQuery_C.h"
 #include "syntaxerrordetector.h"
 
@@ -269,11 +272,30 @@ InnerEditor::InnerEditor(CodeEditorPrivate* d, QWidget* parent)
     : QPlainTextEdit(parent), d_ptr(d) {}
 
 void InnerEditor::keyPressEvent(QKeyEvent* e) {
+    if (d_ptr->dispatchPluginKeyPress(e)) return;
+    if (d_ptr->handleMultiCursorEdit(e)) return;
     if (d_ptr->m_completer && d_ptr->m_completer->handleKeyPress(e)) return;
     if (d_ptr->handleKeyPress(e)) return;
     QPlainTextEdit::keyPressEvent(e);
     if (d_ptr->m_completer && !e->text().isEmpty())
         d_ptr->m_completer->updatePopup();
+}
+
+void InnerEditor::mousePressEvent(QMouseEvent* e)
+{
+    if (e->button() == Qt::LeftButton && (e->modifiers() & Qt::AltModifier)) {
+        const int pos = cursorForPosition(e->position().toPoint()).position();
+        d_ptr->addExtraCursorAtPosition(pos, true);
+        d_ptr->updateCurrentLineHighlight();
+        viewport()->update();
+        e->accept();
+        return;
+    }
+
+    if (!(e->modifiers() & Qt::AltModifier))
+        d_ptr->clearExtraCursors();
+
+    QPlainTextEdit::mousePressEvent(e);
 }
 
 void InnerEditor::paintEvent(QPaintEvent* e) {
@@ -359,39 +381,55 @@ void InnerEditor::paintEvent(QPaintEvent* e) {
         QPlainTextEdit::paintEvent(e);  // no selection — normal path, no overhead
     }
 
-    // Draw " ...}" hint on collapsed fold header lines
-    if (!d_ptr->m_foldingEnabled) return;
-
     QPainter painter(viewport());
     painter.setFont(font());
     QFontMetrics fm(font());
 
-    QTextBlock block = firstVisibleBlock();
-    int  blockNumber = block.blockNumber();
-    qreal top    = blockBoundingGeometry(block).translated(contentOffset()).top();
-    qreal bottom = top + blockBoundingRect(block).height();
+    if (d_ptr->m_foldingEnabled) {
+        QTextBlock block = firstVisibleBlock();
+        int  blockNumber = block.blockNumber();
+        qreal top    = blockBoundingGeometry(block).translated(contentOffset()).top();
+        qreal bottom = top + blockBoundingRect(block).height();
 
-    while (block.isValid() && top <= e->rect().bottom()) {
-        if (block.isVisible() && bottom >= e->rect().top()) {
-            if (d_ptr->m_foldManager->isFolded(blockNumber)) {
-                // Measure the existing line text to place hint after it
-                const int textW = fm.horizontalAdvance(
-                    block.text().replace('\t', QString(d_ptr->m_tabWidth, ' ')));
-                const int blockH = static_cast<int>(bottom - top);
+        while (block.isValid() && top <= e->rect().bottom()) {
+            if (block.isVisible() && bottom >= e->rect().top()) {
+                if (d_ptr->m_foldManager->isFolded(blockNumber)) {
+                    // Measure the existing line text to place hint after it
+                    const int textW = fm.horizontalAdvance(
+                        block.text().replace('\t', QString(d_ptr->m_tabWidth, ' ')));
+                    const int blockH = static_cast<int>(bottom - top);
 
-                painter.save();
-                painter.setPen(d_ptr->m_theme.tokenComment);
-                painter.drawText(textW + 8, static_cast<int>(top),
-                                 fm.horizontalAdvance(" ...}"), blockH,
-                                 Qt::AlignLeft | Qt::AlignVCenter,
-                                 " ...}");
-                painter.restore();
+                    painter.save();
+                    painter.setPen(d_ptr->m_theme.tokenComment);
+                    painter.drawText(textW + 8, static_cast<int>(top),
+                                     fm.horizontalAdvance(" ...}"), blockH,
+                                     Qt::AlignLeft | Qt::AlignVCenter,
+                                     " ...}");
+                    painter.restore();
+                }
             }
+            block = block.next();
+            top   = bottom;
+            bottom = top + blockBoundingRect(block).height();
+            ++blockNumber;
         }
-        block = block.next();
-        top   = bottom;
-        bottom = top + blockBoundingRect(block).height();
-        ++blockNumber;
+    }
+
+    if (!d_ptr->m_multiCursors.isEmpty()) {
+        painter.save();
+        QPen caretPen(d_ptr->m_theme.accent.isValid() ? d_ptr->m_theme.accent : QColor(90, 170, 255));
+        caretPen.setWidth(2);
+        painter.setPen(caretPen);
+
+        for (const MultiCursorState& mc : d_ptr->m_multiCursors) {
+            QTextCursor c(document());
+            const int maxPos = qMax(0, document()->characterCount() - 1);
+            c.setPosition(qBound(0, mc.position, maxPos));
+            const QRect r = cursorRect(c);
+            painter.drawLine(r.left(), r.top() + 1, r.left(), r.bottom() - 1);
+        }
+
+        painter.restore();
     }
 }
 
@@ -413,6 +451,7 @@ CodeEditorPrivate::CodeEditorPrivate(CodeEditor* q, QWidget* parent)
     QTimer::singleShot(0, this, [this]() {
         m_gutter->updateWidth();
         m_gutter->update();
+        syncMiniMapVisibility();
     });
 }
 
@@ -420,12 +459,16 @@ CodeEditorPrivate::CodeEditorPrivate(CodeEditor* q, QWidget* parent)
 void CodeEditorPrivate::setupLayout()
 {
     m_gutter = new GutterWidget(m_editor, q_ptr);
+    m_miniMap = new MiniMapWidget(m_editor, q_ptr);
+    m_miniMap->setTheme(m_theme);
+    m_miniMap->setVisible(false);
 
     QHBoxLayout* layout = new QHBoxLayout(q_ptr);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
     layout->addWidget(m_gutter);
     layout->addWidget(m_editor);
+    layout->addWidget(m_miniMap);
 }
 
 // ── Tree-sitter highlighter ───────────────────────────────────────────────────
@@ -615,6 +658,308 @@ void CodeEditorPrivate::onTreeParsed(void* treePtr)
     m_syntaxChecker->analyze(treePtr);
 }
 
+void CodeEditorPrivate::syncMiniMapVisibility()
+{
+    if (!m_miniMap)
+        return;
+
+    const bool visible = m_miniMapVisibleRequested
+                         && !m_largeFileMode
+                         && !m_asyncLoadInProgress;
+    m_miniMap->setVisible(visible);
+    if (visible)
+        m_miniMap->update();
+}
+
+bool CodeEditorPrivate::dispatchPluginKeyPress(QKeyEvent* event)
+{
+    for (auto it = m_plugins.cbegin(); it != m_plugins.cend(); ++it) {
+        CodeEditorPlugin* plugin = it.value();
+        if (plugin && plugin->onKeyPress(q_ptr, event))
+            return true;
+    }
+    return false;
+}
+
+void CodeEditorPrivate::detachPlugins()
+{
+    for (auto it = m_plugins.begin(); it != m_plugins.end(); ++it) {
+        if (it.value())
+            it.value()->onDetach(q_ptr);
+    }
+    m_plugins.clear();
+}
+
+bool CodeEditorPrivate::addExtraCursorAtPosition(int position, bool toggleExisting)
+{
+    if (!m_editor || !m_editor->document())
+        return false;
+
+    const int maxPos = qMax(0, m_editor->document()->characterCount() - 1);
+    position = qBound(0, position, maxPos);
+
+    QTextCursor primary = m_editor->textCursor();
+    if (!primary.hasSelection() && primary.position() == position)
+        return false;
+
+    for (int i = 0; i < m_multiCursors.size(); ++i) {
+        if (m_multiCursors[i].anchor == position && m_multiCursors[i].position == position) {
+            if (toggleExisting) {
+                m_multiCursors.removeAt(i);
+                return true;
+            }
+            return false;
+        }
+    }
+
+    m_multiCursors.append({position, position});
+    normalizeExtraCursors();
+    return true;
+}
+
+void CodeEditorPrivate::clearExtraCursors()
+{
+    if (m_multiCursors.isEmpty())
+        return;
+    m_multiCursors.clear();
+    updateCurrentLineHighlight();
+    m_editor->viewport()->update();
+}
+
+void CodeEditorPrivate::normalizeExtraCursors()
+{
+    if (!m_editor || !m_editor->document())
+        return;
+
+    const int maxPos = qMax(0, m_editor->document()->characterCount() - 1);
+    const QTextCursor primary = m_editor->textCursor();
+    const int pAnchor = primary.anchor();
+    const int pPos = primary.position();
+
+    QSet<quint64> seen;
+    QVector<MultiCursorState> normalized;
+    normalized.reserve(m_multiCursors.size());
+
+    for (MultiCursorState mc : m_multiCursors) {
+        mc.anchor = qBound(0, mc.anchor, maxPos);
+        mc.position = qBound(0, mc.position, maxPos);
+
+        if (mc.anchor == pAnchor && mc.position == pPos)
+            continue;
+
+        const quint64 key =
+            (static_cast<quint64>(static_cast<quint32>(mc.anchor)) << 32)
+            | static_cast<quint32>(mc.position);
+        if (seen.contains(key))
+            continue;
+        seen.insert(key);
+        normalized.append(mc);
+    }
+
+    m_multiCursors = normalized;
+}
+
+bool CodeEditorPrivate::moveExtraCursorsVertically(int deltaBlocks)
+{
+    if (!m_editor || !m_editor->document() || deltaBlocks == 0)
+        return false;
+
+    const int blockCount = qMax(1, m_editor->document()->blockCount());
+
+    auto cursorTarget = [this, blockCount, deltaBlocks](const QTextCursor& c) {
+        const int sourceBlock = c.blockNumber();
+        const int targetBlockNo = qBound(0, sourceBlock + deltaBlocks, blockCount - 1);
+        const QTextBlock targetBlock = m_editor->document()->findBlockByNumber(targetBlockNo);
+        const int targetCol = c.columnNumber();
+        const int lineLen = qMax(0, targetBlock.length() - 1);
+        return targetBlock.position() + qMin(targetCol, lineLen);
+    };
+
+    bool changed = false;
+    changed |= addExtraCursorAtPosition(cursorTarget(m_editor->textCursor()), false);
+
+    const QVector<MultiCursorState> existing = m_multiCursors;
+    for (const MultiCursorState& mc : existing) {
+        QTextCursor c(m_editor->document());
+        c.setPosition(mc.anchor);
+        c.setPosition(mc.position, QTextCursor::KeepAnchor);
+        changed |= addExtraCursorAtPosition(cursorTarget(c), false);
+    }
+
+    if (changed) {
+        normalizeExtraCursors();
+        updateCurrentLineHighlight();
+        m_editor->viewport()->update();
+    }
+    return changed;
+}
+
+QList<QTextEdit::ExtraSelection> CodeEditorPrivate::multiCursorSelections() const
+{
+    QList<QTextEdit::ExtraSelection> out;
+    if (!m_editor)
+        return out;
+
+    QColor multiSel = m_theme.selectionBackground.isValid()
+                          ? m_theme.selectionBackground
+                          : QColor(90, 120, 180);
+    multiSel.setAlpha(95);
+
+    for (const MultiCursorState& mc : m_multiCursors) {
+        if (mc.anchor == mc.position)
+            continue;
+        QTextEdit::ExtraSelection sel;
+        sel.format.setBackground(multiSel);
+        sel.cursor = QTextCursor(m_editor->document());
+        sel.cursor.setPosition(mc.anchor);
+        sel.cursor.setPosition(mc.position, QTextCursor::KeepAnchor);
+        out.append(sel);
+    }
+
+    return out;
+}
+
+bool CodeEditorPrivate::handleMultiCursorEdit(QKeyEvent* event)
+{
+    if (!m_editor || m_multiCursors.isEmpty())
+        return false;
+
+    if (event->key() == Qt::Key_Escape) {
+        clearExtraCursors();
+        return true;
+    }
+
+    if (m_editor->isReadOnly())
+        return false;
+
+    const Qt::KeyboardModifiers mods = event->modifiers();
+    const bool shiftOnly = mods == Qt::ShiftModifier;
+    const bool plain = mods == Qt::NoModifier;
+    if (!(plain || shiftOnly))
+        return false;
+
+    struct CursorEntry {
+        QTextCursor cursor;
+        bool primary = false;
+        int order = 0;
+    };
+
+    QVector<CursorEntry> entries;
+    entries.reserve(m_multiCursors.size() + 1);
+    entries.append({m_editor->textCursor(), true, 0});
+    for (int i = 0; i < m_multiCursors.size(); ++i) {
+        QTextCursor c(m_editor->document());
+        c.setPosition(m_multiCursors[i].anchor);
+        c.setPosition(m_multiCursors[i].position, QTextCursor::KeepAnchor);
+        entries.append({c, false, i + 1});
+    }
+
+    auto commitEntries = [this](QVector<CursorEntry>& data) {
+        std::sort(data.begin(), data.end(), [](const CursorEntry& a, const CursorEntry& b) {
+            return a.order < b.order;
+        });
+
+        for (const CursorEntry& e : std::as_const(data)) {
+            if (e.primary) {
+                m_editor->setTextCursor(e.cursor);
+                break;
+            }
+        }
+
+        m_multiCursors.clear();
+        for (const CursorEntry& e : std::as_const(data)) {
+            if (!e.primary)
+                m_multiCursors.append({e.cursor.anchor(), e.cursor.position()});
+        }
+        normalizeExtraCursors();
+        updateCurrentLineHighlight();
+        m_editor->viewport()->update();
+    };
+
+    if (event->key() == Qt::Key_Left || event->key() == Qt::Key_Right
+        || event->key() == Qt::Key_Up || event->key() == Qt::Key_Down
+        || event->key() == Qt::Key_Home || event->key() == Qt::Key_End) {
+        QTextCursor::MoveMode moveMode = shiftOnly
+                                             ? QTextCursor::KeepAnchor
+                                             : QTextCursor::MoveAnchor;
+        for (CursorEntry& e : entries) {
+            switch (event->key()) {
+            case Qt::Key_Left:  e.cursor.movePosition(QTextCursor::Left, moveMode); break;
+            case Qt::Key_Right: e.cursor.movePosition(QTextCursor::Right, moveMode); break;
+            case Qt::Key_Up:    e.cursor.movePosition(QTextCursor::Up, moveMode); break;
+            case Qt::Key_Down:  e.cursor.movePosition(QTextCursor::Down, moveMode); break;
+            case Qt::Key_Home:  e.cursor.movePosition(QTextCursor::StartOfLine, moveMode); break;
+            case Qt::Key_End:   e.cursor.movePosition(QTextCursor::EndOfLine, moveMode); break;
+            default: break;
+            }
+        }
+        commitEntries(entries);
+        return true;
+    }
+
+    enum class EditOp {
+        InsertText,
+        InsertNewline,
+        InsertTab,
+        Backspace,
+        Delete
+    };
+
+    EditOp op;
+    QString payload;
+    if (event->key() == Qt::Key_Backspace) {
+        op = EditOp::Backspace;
+    } else if (event->key() == Qt::Key_Delete) {
+        op = EditOp::Delete;
+    } else if (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) {
+        op = EditOp::InsertNewline;
+    } else if (event->key() == Qt::Key_Tab) {
+        op = EditOp::InsertTab;
+    } else if (!event->text().isEmpty() && event->text().at(0).isPrint()) {
+        op = EditOp::InsertText;
+        payload = event->text();
+    } else {
+        return false;
+    }
+
+    std::sort(entries.begin(), entries.end(), [](const CursorEntry& a, const CursorEntry& b) {
+        return qMax(a.cursor.selectionStart(), a.cursor.position())
+               > qMax(b.cursor.selectionStart(), b.cursor.position());
+    });
+
+    QTextCursor transaction(m_editor->document());
+    transaction.beginEditBlock();
+    for (CursorEntry& e : entries) {
+        switch (op) {
+        case EditOp::InsertText:
+            e.cursor.insertText(payload);
+            break;
+        case EditOp::InsertNewline:
+            e.cursor.insertText("\n");
+            break;
+        case EditOp::InsertTab:
+            e.cursor.insertText(m_insertSpaces ? QString(m_tabWidth, ' ') : QString("\t"));
+            break;
+        case EditOp::Backspace:
+            if (e.cursor.hasSelection())
+                e.cursor.removeSelectedText();
+            else
+                e.cursor.deletePreviousChar();
+            break;
+        case EditOp::Delete:
+            if (e.cursor.hasSelection())
+                e.cursor.removeSelectedText();
+            else
+                e.cursor.deleteChar();
+            break;
+        }
+    }
+    transaction.endEditBlock();
+
+    commitEntries(entries);
+    return true;
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 void CodeEditorPrivate::enforceFixedLineHeight(int from, int charsAdded)
 {
@@ -739,6 +1084,7 @@ void CodeEditorPrivate::suspendHeavyEditorFeatures()
     m_bracketSelections.clear();
     m_searchSelections.clear();
     m_lineHighlightSelections.clear();
+    m_multiCursors.clear();
     updateCurrentLineHighlight();
 }
 
@@ -764,6 +1110,7 @@ void CodeEditorPrivate::resumeHeavyEditorFeatures()
 
     if (m_foldingEnabled && m_gutter)
         m_gutter->setFoldingVisible(!m_largeDocumentMode);
+    syncMiniMapVisibility();
 }
 
 void CodeEditorPrivate::cancelAsyncFileLoad()
@@ -782,6 +1129,7 @@ void CodeEditorPrivate::cancelAsyncFileLoad()
         delete m_asyncLoadThread;
         m_asyncLoadThread = nullptr;
     }
+    syncMiniMapVisibility();
 }
 
 bool CodeEditorPrivate::startAsyncFileLoad(const QString& filePath)
@@ -805,11 +1153,15 @@ bool CodeEditorPrivate::startAsyncFileLoad(const QString& filePath)
     m_asyncLoadInProgress = true;
     m_asyncLoadedPath = filePath;
     m_asyncLoadedBytes = fileSize;
+    m_loadedFilePath = filePath;
+    m_loadedFileSize = fileSize;
     m_savedReadOnly = m_editor->isReadOnly();
+    m_multiCursors.clear();
     suspendHeavyEditorFeatures();
     m_editor->setUndoRedoEnabled(false);
     m_editor->setReadOnly(true);
     m_editor->setPlainText(QStringLiteral("Loading file asynchronously..."));
+    syncMiniMapVisibility();
 
     m_asyncLoadThread = QThread::create([mapped, fileSize, decodedText]() {
         *decodedText = QString::fromUtf8(
@@ -872,6 +1224,7 @@ void CodeEditorPrivate::applyNextTextChunk(int generation)
         }
         m_gutter->updateWidth();
         m_gutter->update();
+        syncMiniMapVisibility();
         emit q_ptr->fileLoaded(m_asyncLoadedPath);
         m_asyncLoadedText.clear();
         m_asyncLoadedPath.clear();
@@ -934,6 +1287,7 @@ void CodeEditorPrivate::exitLargeFileMode()
     m_editor->setReadOnly(m_savedReadOnly);
     m_editor->setUndoRedoEnabled(true);
     resumeHeavyEditorFeatures();
+    syncMiniMapVisibility();
 }
 
 bool CodeEditorPrivate::enterLargeFileMode(const QString& filePath)
@@ -958,12 +1312,14 @@ bool CodeEditorPrivate::enterLargeFileMode(const QString& filePath)
     m_savedReadOnly = m_editor->isReadOnly();
     m_editor->setReadOnly(true);
     m_editor->setUndoRedoEnabled(false);
+    m_multiCursors.clear();
 
     suspendHeavyEditorFeatures();
     if (m_gutter)
         m_gutter->setFoldingVisible(false);
 
     m_editor->setPlainText(QStringLiteral("Loading large file..."));
+    syncMiniMapVisibility();
     requestLargeFileWindow(0, LargeFileAnchorTop);
     startLargeFileIndexing();
     return true;
@@ -1216,6 +1572,7 @@ void CodeEditorPrivate::updateCurrentLineHighlight() {
     // Line-highlight selections drawn first (lowest z-order) so bracket
     // and search highlights paint on top of them.
     extras.append(m_lineHighlightSelections);
+    extras.append(multiCursorSelections());
     extras.append(m_bracketSelections);
     extras.append(m_searchSelections);
     m_editor->setExtraSelections(extras);
@@ -1266,6 +1623,22 @@ void CodeEditorPrivate::updateBracketMatch() {
 }
 
 bool CodeEditorPrivate::handleKeyPress(QKeyEvent* event) {
+    if (event->key() == Qt::Key_Escape && !m_multiCursors.isEmpty()) {
+        clearExtraCursors();
+        return true;
+    }
+
+    if ((event->modifiers() & Qt::ControlModifier)
+        && (event->modifiers() & Qt::AltModifier)
+        && event->key() == Qt::Key_Up) {
+        return moveExtraCursorsVertically(-1);
+    }
+    if ((event->modifiers() & Qt::ControlModifier)
+        && (event->modifiers() & Qt::AltModifier)
+        && event->key() == Qt::Key_Down) {
+        return moveExtraCursorsVertically(1);
+    }
+
     if (event->modifiers() & Qt::ControlModifier && event->key() == Qt::Key_T) {
         static int themeIndex = 0;
         static const std::function<QEditorTheme()> themes[] = {
@@ -1420,6 +1793,10 @@ void CodeEditorPrivate::onCursorPositionChanged() {
 
 void CodeEditorPrivate::onTextChanged()
 {
+    if (!m_multiCursors.isEmpty()) {
+        normalizeExtraCursors();
+        updateCurrentLineHighlight();
+    }
     if (!m_largeFileMode && !m_asyncLoadInProgress) {
         const qint64 approxBytes = static_cast<qint64>(m_editor->document()->characterCount()) * 2;
         if (m_largeDocumentMode != shouldUseLargeDocumentMode(approxBytes))
@@ -1463,6 +1840,7 @@ CodeEditor::CodeEditor(QWidget* parent)
 CodeEditor::~CodeEditor()
 {
     if (d_ptr) {
+        d_ptr->detachPlugins();
         d_ptr->cancelAsyncFileLoad();
         d_ptr->exitLargeFileMode();
         delete d_ptr->m_largeFileState;
@@ -1473,6 +1851,9 @@ CodeEditor::~CodeEditor()
 void CodeEditor::setText(const QString& text) {
     d_ptr->cancelAsyncFileLoad();
     d_ptr->exitLargeFileMode();
+    d_ptr->m_loadedFilePath.clear();
+    d_ptr->m_loadedFileSize = 0;
+    d_ptr->clearExtraCursors();
     const qint64 approxBytes = static_cast<qint64>(text.size()) * 2;
     const bool suspendForBulkSet = approxBytes >= kAsyncLoadThreshold;
     const bool suspendedHere = suspendForBulkSet && !d_ptr->m_heavyFeaturesSuspended;
@@ -1505,6 +1886,7 @@ void CodeEditor::setText(const QString& text) {
     QTimer::singleShot(0, this, [this]() {
         d_ptr->m_gutter->updateWidth();
         d_ptr->m_gutter->update();
+        d_ptr->syncMiniMapVisibility();
     });
 }
 
@@ -1522,10 +1904,14 @@ void CodeEditor::insertText(const QString& text) {
 void CodeEditor::clear() {
     d_ptr->cancelAsyncFileLoad();
     d_ptr->exitLargeFileMode();
+    d_ptr->m_loadedFilePath.clear();
+    d_ptr->m_loadedFileSize = 0;
+    d_ptr->clearExtraCursors();
     if (d_ptr->m_heavyFeaturesSuspended)
         d_ptr->resumeHeavyEditorFeatures();
     d_ptr->m_editor->clear();
     d_ptr->applyDocumentPerformanceMode(0);
+    d_ptr->syncMiniMapVisibility();
 }
 
 bool CodeEditor::loadFile(const QString& filePath) {
@@ -1534,12 +1920,16 @@ bool CodeEditor::loadFile(const QString& filePath) {
     if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
     const qint64 fileSize = f.size();
     f.close();
+    d_ptr->m_loadedFilePath = filePath;
+    d_ptr->m_loadedFileSize = fileSize;
+    d_ptr->clearExtraCursors();
 
-    if (d_ptr->shouldUseLargeFileMode(fileSize)) {
+    if (d_ptr->shouldUseLargeFileMode(fileSize) && !d_ptr->m_preferEditableLargeFiles) {
         if (!d_ptr->enterLargeFileMode(filePath))
             return false;
         emit fileLoaded(filePath);
-    } else if (d_ptr->shouldUseAsyncFullLoad(fileSize)) {
+    } else if (d_ptr->shouldUseAsyncFullLoad(fileSize)
+               || (d_ptr->shouldUseLargeFileMode(fileSize) && d_ptr->m_preferEditableLargeFiles)) {
         return d_ptr->startAsyncFileLoad(filePath);
     } else {
         if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
@@ -1547,6 +1937,8 @@ bool CodeEditor::loadFile(const QString& filePath) {
         if (d_ptr->m_heavyFeaturesSuspended)
             d_ptr->resumeHeavyEditorFeatures();
         setText(QString::fromUtf8(f.readAll()));
+        d_ptr->m_loadedFilePath = filePath;
+        d_ptr->m_loadedFileSize = fileSize;
         emit fileLoaded(filePath);
     }
     return true;
@@ -1601,6 +1993,7 @@ void CodeEditor::setTheme(const QEditorTheme& theme) {
     if (d->m_completer)      d->m_completer->setPopupTheme(theme);
     if (d->m_functionPopup)  d->m_functionPopup->setTheme(theme);
     if (d->m_searchBar)      d->m_searchBar->setTheme(theme);
+    if (d->m_miniMap)        d->m_miniMap->setTheme(theme);
 }
 
 void CodeEditor::setThemeFromFile(const QString& jsonPath) { setTheme(QEditorTheme::fromJsonFile(jsonPath)); }
@@ -1616,11 +2009,32 @@ void CodeEditor::setLineNumbersVisible(bool visible) {
 void CodeEditor::setMiniMapVisible(bool visible)
 {
     d_ptr->m_miniMapVisibleRequested = visible;
-    static bool warned = false;
-    if (!warned) {
-        qWarning("CodeEditor::setMiniMapVisible(): minimap is not implemented yet.");
-        warned = true;
+    d_ptr->syncMiniMapVisibility();
+}
+
+void CodeEditor::setEditableLargeFileMode(bool enabled)
+{
+    d_ptr->m_preferEditableLargeFiles = enabled;
+    if (!enabled)
+        return;
+
+    if (d_ptr->m_largeFileMode
+        && d_ptr->m_largeFileState
+        && d_ptr->m_largeFileState->file.isOpen()) {
+        const QString path = d_ptr->m_largeFileState->file.fileName();
+        if (!path.isEmpty())
+            d_ptr->startAsyncFileLoad(path);
     }
+}
+
+bool CodeEditor::editableLargeFileMode() const
+{
+    return d_ptr->m_preferEditableLargeFiles;
+}
+
+bool CodeEditor::isLargeFileWindowedMode() const
+{
+    return d_ptr->m_largeFileMode;
 }
 
 void CodeEditor::setFoldingEnabled(bool enabled) {
@@ -1902,6 +2316,39 @@ int     CodeEditor::currentLine()   const { return d_ptr->largeFileCurrentLine()
 int     CodeEditor::currentColumn() const { return d_ptr->m_editor->textCursor().columnNumber() + 1; }
 QString CodeEditor::selectedText()  const { return d_ptr->m_editor->textCursor().selectedText(); }
 void    CodeEditor::selectAll()           { d_ptr->m_editor->selectAll(); }
+bool CodeEditor::addCursorAt(int line, int column)
+{
+    if (d_ptr->m_largeFileMode || d_ptr->m_asyncLoadInProgress)
+        return false;
+
+    if (!d_ptr->m_editor || !d_ptr->m_editor->document())
+        return false;
+
+    const int blockNo = qMax(0, line - 1);
+    QTextBlock block = d_ptr->m_editor->document()->findBlockByNumber(blockNo);
+    if (!block.isValid())
+        return false;
+
+    const int safeColumn = qMax(0, column - 1);
+    const int lineLen = qMax(0, block.length() - 1);
+    const int pos = block.position() + qMin(safeColumn, lineLen);
+    const bool changed = d_ptr->addExtraCursorAtPosition(pos, true);
+    if (changed) {
+        d_ptr->updateCurrentLineHighlight();
+        d_ptr->m_editor->viewport()->update();
+    }
+    return changed;
+}
+
+void CodeEditor::clearAdditionalCursors()
+{
+    d_ptr->clearExtraCursors();
+}
+
+int CodeEditor::additionalCursorCount() const
+{
+    return d_ptr->m_multiCursors.size();
+}
 
 void CodeEditor::setCustomKeywords(const QStringList& kw) { if (d_ptr->m_completer) d_ptr->m_completer->setCustomKeywords(kw); }
 void CodeEditor::addCustomKeyword (const QString& kw)     { if (d_ptr->m_completer) d_ptr->m_completer->addCustomKeyword(kw); }
@@ -1912,9 +2359,42 @@ void CodeEditor::setReadOnly(bool r) {
 }
 bool CodeEditor::isReadOnly() const  { return d_ptr->m_editor->isReadOnly(); }
 
+bool CodeEditor::registerPlugin(CodeEditorPlugin* plugin)
+{
+    if (!plugin)
+        return false;
+
+    const QString id = plugin->id().trimmed();
+    if (id.isEmpty() || d_ptr->m_plugins.contains(id))
+        return false;
+
+    d_ptr->m_plugins.insert(id, plugin);
+    plugin->onAttach(this);
+    return true;
+}
+
+bool CodeEditor::unregisterPlugin(const QString& pluginId)
+{
+    auto it = d_ptr->m_plugins.find(pluginId);
+    if (it == d_ptr->m_plugins.end())
+        return false;
+
+    if (it.value())
+        it.value()->onDetach(this);
+    d_ptr->m_plugins.erase(it);
+    return true;
+}
+
+QStringList CodeEditor::pluginIds() const
+{
+    return d_ptr->m_plugins.keys();
+}
+
 void CodeEditor::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
     d_ptr->updateLineNumberAreaWidth(0);
+    if (d_ptr->m_miniMap)
+        d_ptr->m_miniMap->update();
 }
 
 // ── Function list popup ───────────────────────────────────────────────────────

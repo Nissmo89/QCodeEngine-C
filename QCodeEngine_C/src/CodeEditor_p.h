@@ -14,6 +14,10 @@
 #include "treesitterhelper.h"
 #include "CodeEditor/LineHighlighter.h"
 #include "CodeEditor/FindReplaceBar.h"
+#include "CodeEditor/MiniMapWidget.h"
+
+class QKeyEvent;
+class QMouseEvent;
 
 // Forward declarations for future stages
 // class QSyntaxHighlighter_TS;
@@ -23,6 +27,10 @@
 
 class CodeEditorPrivate;
 struct LargeFileState;
+struct MultiCursorState {
+    int anchor = 0;
+    int position = 0;
+};
 
 class InnerEditor : public QPlainTextEdit {
     Q_OBJECT
@@ -36,6 +44,7 @@ public:
 
 protected:
     void keyPressEvent(QKeyEvent* e) override;
+    void mousePressEvent(QMouseEvent* e) override;
     void paintEvent(QPaintEvent* e) override;
 
 private:
@@ -77,6 +86,7 @@ public:
     bool m_miniMapVisibleRequested = false;
     bool m_largeFileMode = false;
     bool m_largeDocumentMode = false;
+    bool m_preferEditableLargeFiles = false;
     bool m_savedReadOnly = false;
     bool m_asyncLoadInProgress = false;
     bool m_heavyFeaturesSuspended = false;
@@ -86,7 +96,9 @@ public:
     bool m_lastSearchRegex = false;
     QString m_asyncLoadedText;
     QString m_asyncLoadedPath;
+    QString m_loadedFilePath;
     qint64 m_asyncLoadedBytes = 0;
+    qint64 m_loadedFileSize = 0;
     qsizetype m_asyncLoadOffset = 0;
     int m_asyncLoadGeneration = 0;
 
@@ -97,12 +109,14 @@ public:
     QList<QTextEdit::ExtraSelection> m_bracketSelections;
     QList<QTextEdit::ExtraSelection> m_searchSelections;
     QList<QTextEdit::ExtraSelection> m_lineHighlightSelections;
+    QVector<MultiCursorState> m_multiCursors;
+    QMap<QString, CodeEditorPlugin*> m_plugins;
 
     // Future components
     TreeSitterHighlighter* m_highlighter    = nullptr;
     LineHighlighter*       m_lineHighlighter = nullptr;
     AutoCompleter* m_completer = nullptr;
-    // QMiniMap* m_miniMap = nullptr;
+    MiniMapWidget* m_miniMap = nullptr;
     FindReplaceBar* m_searchBar = nullptr;
     GutterWidget *m_gutter = nullptr;
 
@@ -128,8 +142,17 @@ public:
     void setupConnections();
     void setupActions();
     void onTreeParsed(void* treePtr);
+    void syncMiniMapVisibility();
     void enforceFixedLineHeight(int from, int charsAdded);
     void onGutterMarkerToggled(int line, MarkerType type);
+    bool dispatchPluginKeyPress(QKeyEvent* event);
+    void detachPlugins();
+    bool addExtraCursorAtPosition(int position, bool toggleExisting = true);
+    void clearExtraCursors();
+    void normalizeExtraCursors();
+    bool moveExtraCursorsVertically(int deltaBlocks);
+    bool handleMultiCursorEdit(QKeyEvent* event);
+    QList<QTextEdit::ExtraSelection> multiCursorSelections() const;
     bool shouldUseLargeFileMode(qint64 fileSize) const;
     bool shouldUseLargeDocumentMode(qint64 sourceBytesHint) const;
     void applyDocumentPerformanceMode(qint64 sourceBytesHint = -1);
