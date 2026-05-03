@@ -65,6 +65,11 @@ QEditorTheme QEditorTheme::cursorDarkTheme() {
         QColor("#AAA0FA")
     };
 
+    t.diagnosticError   = QColor("#E34671");   // matches bracketMismatch
+    t.diagnosticWarning = QColor("#F1B467");
+    t.diagnosticInfo    = QColor("#82D2CE");
+    t.diagnosticHint    = QColor("#3FA266");
+
     t.fontFamily = "JetBrains Mono";
     t.fontSize   = 14;
 

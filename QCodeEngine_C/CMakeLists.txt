@@ -41,10 +41,11 @@ add_library(QCodeEngine_C
     src/treesitterhelper.cpp
     src/functionlistpopup.h
     src/FoldQuery.cpp
-    src/FoldQuery.cpp
     include/CodeEditor/FindReplaceBar.h
     include/CodeEditor/LineHighlighter.h
     src/LineHighlighter.cpp
+    include/CodeEditor/diagnosticmanager.h include/CodeEditor/diagnosticmanager.cpp
+    src/syntaxerrordetector.h src/syntaxerrordetector.cpp
 )
 
 

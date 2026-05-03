@@ -82,4 +82,10 @@ struct QEditorTheme {
 
     void toJsonFile(const QString& path) const;
     QString toJsonString() const;
+
+    // Diagnostics
+    QColor diagnosticError   { 220,  50,  50 };
+    QColor diagnosticWarning { 230, 160,  30 };
+    QColor diagnosticInfo    {  50, 150, 220 };
+    QColor diagnosticHint    { 100, 180, 100 };
 };
