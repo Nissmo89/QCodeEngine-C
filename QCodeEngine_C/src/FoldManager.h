@@ -31,6 +31,7 @@
 #include <QMap>
 #include <QSet>
 #include <QHash>
+#include <QVector>
 #include <QTextDocument>
 #include <tree_sitter/api.h>
 #include "CodeEditor/FoldQuery.h"
@@ -64,6 +65,10 @@ public:
     void toggleFold(int blockNumber);           // emits foldStateChanged
     void foldAll();                             // batch; one signal
     void unfoldAll();                           // batch; one signal
+
+    // Optional persistence helpers (0-based fold header rows).
+    QVector<int> saveCollapsedState() const;
+    void restoreCollapsedState(const QVector<int>& collapsedStarts);
 
 signals:
     void foldRangesUpdated();   // new ranges computed (from updateFoldRanges)

@@ -8,6 +8,8 @@ enum class GutterIconType {
     Info,           // blue circle ℹ
     Tip,            // lightbulb 💡
     Breakpoint,     // red circle
+    Bookmark,
+    Tracepoint,
 };
 
 struct GutterIconInfo {

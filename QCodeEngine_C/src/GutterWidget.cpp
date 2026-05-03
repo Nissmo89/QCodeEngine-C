@@ -550,6 +550,8 @@ static MarkerType markerTypeForIcon(GutterIconType type)
     case GutterIconType::Info:       return MarkerType::Info;
     case GutterIconType::Tip:        return MarkerType::Info;
     case GutterIconType::Breakpoint: return MarkerType::Breakpoint;
+    case GutterIconType::Bookmark:   return MarkerType::Bookmark;
+    case GutterIconType::Tracepoint: return MarkerType::Tracepoint;
     default:                         return MarkerType::Info;
     }
 }

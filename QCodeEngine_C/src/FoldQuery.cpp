@@ -46,8 +46,23 @@ static void addPreprocessorChainFolds(TSNode  node,
                                       TSNode  alt,
                                       uint32_t rootEndRow,
                                       uint32_t rootEndByte,
-                                      std::vector<FoldRange>& out)
+                                      std::vector<FoldRange>& out,
+                                      int depth)
 {
+    if (depth > FoldQuery::MAX_PREPROC_DEPTH) {
+        const TSPoint nodeStart = ts_node_start_point(node);
+        if (rootEndRow > nodeStart.row) {
+            FoldRange fr;
+            fr.startRow  = nodeStart.row;
+            fr.endRow    = rootEndRow;
+            fr.startByte = ts_node_start_byte(node);
+            fr.endByte   = rootEndByte;
+            fr.collapsed = false;
+            out.push_back(fr);
+        }
+        return;
+    }
+
     const TSPoint nodeStart = ts_node_start_point(node);
     const TSPoint altStart  = ts_node_start_point(alt);
 
@@ -86,7 +101,7 @@ static void addPreprocessorChainFolds(TSNode  node,
         }
     } else {
         // Another #elif further along — keep recursing.
-        addPreprocessorChainFolds(alt, nextAlt, rootEndRow, rootEndByte, out);
+        addPreprocessorChainFolds(alt, nextAlt, rootEndRow, rootEndByte, out, depth + 1);
     }
 }
 
@@ -123,7 +138,8 @@ static void splitPreprocessorFolds(TSNode node, std::vector<FoldRange>& out)
         addPreprocessorChainFolds(node, alt,
                                   nodeEnd.row,
                                   ts_node_end_byte(node),
-                                  out);
+                                  out,
+                                  0);
     }
 }
 

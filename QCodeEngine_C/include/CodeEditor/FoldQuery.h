@@ -39,6 +39,9 @@ struct FoldRange {
 // ---------------------------------------------------------------------------
 class FoldQuery {
 public:
+    // Safety guard for deep #if/#elif chains when splitting alternatives.
+    static constexpr int MAX_PREPROC_DEPTH = 512;
+
     // Canonical fold scheme for C — single source of truth.
     // FoldManager and unit tests both reference this constant; the dead
     // c_folds.scm in the QRC can be removed or replaced with a #include.
@@ -80,8 +83,6 @@ public:
 (initializer_list) @fold
 (gnu_asm_expression) @fold
 (preproc_function_def) @fold
-(parenthesized_expression) @fold
-(return_statement) @fold
 )SCHEME";
 
 // // Arena Ai

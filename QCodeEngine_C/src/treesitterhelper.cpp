@@ -1,14 +1,20 @@
 #include "treesitterhelper.h"
 #include "qregularexpression.h"
+#include <QDebug>
 #include <cstring> // for strcmp
 #include <iostream>
-#include <qtextobject.h>
+#include <QTextBlock>
 
 TreeSitterHelper::TreeSitterHelper(const QString &sourceCode)
 {
     // 1. Initialize Parser
     m_parser = ts_parser_new();
-    ts_parser_set_language(m_parser, tree_sitter_c());
+    if (!m_parser)
+        return;
+
+    const TSLanguage* language = tree_sitter_c();
+    if (!language || !ts_parser_set_language(m_parser, language))
+        return;
 
     // 2. Convert QString to UTF-8 Byte Array
     // IMPORTANT: Store this as a member so it persists as long as the tree exists
@@ -21,6 +27,8 @@ TreeSitterHelper::TreeSitterHelper(const QString &sourceCode)
         m_sourceBytes.constData(),
         m_sourceBytes.length()
         );
+    if (!m_tree)
+        return;
 
     // 4. GET ROOT NODE
     TSNode root = ts_tree_root_node(m_tree);
@@ -41,6 +49,9 @@ TreeSitterHelper::~TreeSitterHelper()
 QVector<TSNode> TreeSitterHelper::getNodesByType(const QString &nodeType)
 {
     QVector<TSNode> results;
+    if (!m_tree)
+        return results;
+
     TSNode root = ts_tree_root_node(m_tree);
 
     // Convert target type to const char* for comparison
@@ -52,6 +63,9 @@ QVector<TSNode> TreeSitterHelper::getNodesByType(const QString &nodeType)
 
 void TreeSitterHelper::traverseAndCollect(TSNode node, const char* targetType, QVector<TSNode> &outList)
 {
+    if (!targetType || ts_node_is_null(node))
+        return;
+
     // 1. Check if the current node matches the type
     const char* currentType = ts_node_type(node);
 
@@ -69,8 +83,13 @@ void TreeSitterHelper::traverseAndCollect(TSNode node, const char* targetType, Q
 
 QString TreeSitterHelper::getNodeText(TSNode node) const
 {
+    if (ts_node_is_null(node))
+        return {};
+
     uint32_t startByte = ts_node_start_byte(node);
     uint32_t endByte = ts_node_end_byte(node);
+    if (endByte <= startByte)
+        return {};
 
     // Extract snippet from the stored source bytes
     QByteArray snippet = m_sourceBytes.mid(startByte, endByte - startByte);

@@ -8,6 +8,8 @@
 #include "FoldManager.h"
 #include <QTextBlock>
 #include <QDebug>
+#include <algorithm>
+#include <utility>
 
 extern "C" { const TSLanguage* tree_sitter_c(void); }
 
@@ -169,6 +171,33 @@ void FoldManager::unfoldAll()
 {
     if (m_collapsed.isEmpty()) return;
     m_collapsed.clear();
+    rebuildCaches();
+    applyFoldsToDocument();
+    emit foldStateChanged();
+}
+
+QVector<int> FoldManager::saveCollapsedState() const
+{
+    QVector<int> rows;
+    rows.reserve(m_collapsed.size());
+    for (int row : m_collapsed)
+        rows.append(row);
+    std::sort(rows.begin(), rows.end());
+    return rows;
+}
+
+void FoldManager::restoreCollapsedState(const QVector<int>& collapsedStarts)
+{
+    QSet<int> next;
+    for (int row : collapsedStarts) {
+        if (m_ranges.contains(row))
+            next.insert(row);
+    }
+
+    if (next == m_collapsed)
+        return;
+
+    m_collapsed = std::move(next);
     rebuildCaches();
     applyFoldsToDocument();
     emit foldStateChanged();

@@ -53,8 +53,8 @@ private:
     // Recursive implementation to traverse the tree
     void traverseAndCollect(TSNode node, const char* targetType, QVector<TSNode> &outList);
 
-    TSParser *m_parser;
-    TSTree *m_tree;
+    TSParser *m_parser = nullptr;
+    TSTree *m_tree = nullptr;
 
     // We must keep the byte array alive because tree-sitter points to this memory
     QByteArray m_sourceBytes;
