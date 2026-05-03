@@ -12,6 +12,7 @@ struct QEditorTheme {
     QColor selectionForeground;
     QColor currentLineBackground;
     QColor lineNumberForeground;
+    QColor accent;               // generic UI accent (carets, minimap borders, etc.)
 
     // Gutter
     QColor gutterBackground;

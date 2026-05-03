@@ -15,6 +15,7 @@ QEditorTheme QEditorTheme::cursorDarkTheme() {
     t.selectionForeground = QColor("#EBE4E4E4");
     t.currentLineBackground = QColor("#262626");
     t.lineNumberForeground = QColor("#42E4E4E4"); // Was E4E4E4 42
+    t.accent = QColor("#82D2CE");
     t.gutterBackground = QColor("#181818");
     t.gutterForeground = QColor("#42E4E4E4");
     t.gutterBorderColor = QColor("#181818");
@@ -84,6 +85,7 @@ QEditorTheme QEditorTheme::draculaTheme() {
     t.selectionBackground = QColor("#44475A");
     t.selectionForeground = QColor("#F8F8F2");
     t.currentLineBackground = QColor("#44475A");
+    t.accent = QColor("#8BE9FD");
     t.currentLineBackground.setAlpha(64);
     t.lineNumberForeground = QColor("#6272A4");
     t.gutterBackground = QColor("#282A36");
@@ -146,6 +148,7 @@ QEditorTheme QEditorTheme::monokaiTheme() {
     t.selectionBackground = QColor("#49483E");
     t.selectionForeground = QColor("#F8F8F2");
     t.currentLineBackground = QColor("#3E3D32");
+    t.accent = QColor("#A6E22E");
     t.lineNumberForeground = QColor("#75715E");
     t.gutterBackground = QColor("#272822");
     t.gutterForeground = QColor("#75715E");
@@ -210,6 +213,7 @@ QEditorTheme QEditorTheme::oneDarkTheme() {
     t.selectionBackground = QColor("#3e4451");
     t.selectionForeground = QColor("#abb2bf");
     t.currentLineBackground = QColor("#2c313c");
+    t.accent = QColor("#61afef");
     t.lineNumberForeground = QColor("#4b5263");
     t.gutterBackground = QColor("#282c34");
     t.gutterForeground = QColor("#4b5263");
@@ -272,6 +276,7 @@ QEditorTheme QEditorTheme::solarizedDarkTheme() {
     t.selectionBackground = QColor("#073642");
     t.selectionForeground = QColor("#93a1a1");
     t.currentLineBackground = QColor("#073642");
+    t.accent = QColor("#268bd2");
     t.lineNumberForeground = QColor("#586e75");
     t.gutterBackground = QColor("#002b36");
     t.gutterForeground = QColor("#586e75");
@@ -336,6 +341,7 @@ QEditorTheme QEditorTheme::githubLightTheme() {
     t.selectionBackground = QColor("#c8e1ff");
     t.selectionForeground = QColor("#24292e");
     t.currentLineBackground = QColor("#f6f8fa");
+    t.accent = QColor("#0366d6");
     t.lineNumberForeground = QColor("#1b1f23");
     t.lineNumberForeground.setAlpha(76); // ~30% alpha
     t.gutterBackground = QColor("#ffffff");
@@ -406,6 +412,7 @@ QEditorTheme QEditorTheme::fromJsonString(const QString& jsonStr) {
     if (obj.contains("name")) t.name = obj["name"].toString();
     if (obj.contains("background")) t.background = QColor(obj["background"].toString());
     if (obj.contains("foreground")) t.foreground = QColor(obj["foreground"].toString());
+    if (obj.contains("accent")) t.accent = QColor(obj["accent"].toString());
     if (obj.contains("tokenKeyword")) t.tokenKeyword = QColor(obj["tokenKeyword"].toString());
     // (A complete implementation would parse all fields)
     
@@ -424,6 +431,7 @@ QString QEditorTheme::toJsonString() const {
     obj["name"] = name;
     obj["background"] = background.name(QColor::HexArgb);
     obj["foreground"] = foreground.name(QColor::HexArgb);
+    obj["accent"] = accent.isValid() ? accent.name(QColor::HexArgb) : QStringLiteral("#FF5AA9FF");
     // (A complete implementation would output all fields)
     return QJsonDocument(obj).toJson(QJsonDocument::Indented);
 }
