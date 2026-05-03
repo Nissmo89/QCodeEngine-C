@@ -1,8 +1,10 @@
 #pragma once
 #include <QWidget>
+#include <QStringList>
 #include "EditorTheme.h"
 #include "EditorTypes.h"
 #include "GutterWidget.h"
+#include "PluginAPI.h"
 #include "../src/functionlistpopup.h"
 
 
@@ -36,6 +38,9 @@ public:
     // --- Features toggles ---
     void        setLineNumbersVisible(bool visible);
     void        setMiniMapVisible(bool visible);
+    void        setEditableLargeFileMode(bool enabled);
+    bool        editableLargeFileMode() const;
+    bool        isLargeFileWindowedMode() const;
     void        setFoldingEnabled(bool enabled);
     void        setAutoCompleteEnabled(bool enabled);
     void        setAutoIndentEnabled(bool enabled);
@@ -70,6 +75,9 @@ public:
     int         currentColumn() const;
     QString     selectedText() const;
     void        selectAll();
+    bool        addCursorAt(int line, int column = 1);
+    void        clearAdditionalCursors();
+    int         additionalCursorCount() const;
 
     // --- Autocomplete custom keywords ---
     void        setCustomKeywords(const QStringList& keywords);
@@ -78,6 +86,11 @@ public:
     // --- Read-only ---
     void        setReadOnly(bool readOnly);
     bool        isReadOnly() const;
+
+    // --- Plugin API ---
+    bool        registerPlugin(CodeEditorPlugin* plugin);
+    bool        unregisterPlugin(const QString& pluginId);
+    QStringList pluginIds() const;
 
 
     // ✅ NEW: Show function list popup
