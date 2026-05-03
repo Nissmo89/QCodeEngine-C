@@ -23,6 +23,7 @@ int main(int argc, char* argv[]) {
 
     // Configure features
     editor->setLineNumbersVisible(true);
+    // editor->setMiniMapVisible(true);
     editor->setFoldingEnabled(true);
     editor->setAutoCompleteEnabled(true);
     editor->setTabWidth(4);

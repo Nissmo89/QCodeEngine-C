@@ -30,12 +30,14 @@ add_library(QCodeEngine_C
     src/TreeSitterHighlighter.cpp
     include/CodeEditor/CodeEditor.h
     include/CodeEditor/GutterWidget.h
+    include/CodeEditor/MiniMapWidget.h
+    include/CodeEditor/PluginAPI.h
     src/CodeEditor_p.h
     src/FoldManager.h
     src/TreeSitterHighlighter.h
     src/AutoCompleter.cpp
     src/AutoCompleter.h
-#    src/QMiniMap.cpp
+    src/MiniMapWidget.cpp
 #    src/QSearchBar.cpp
     src/treesitterhelper.h
     src/treesitterhelper.cpp
