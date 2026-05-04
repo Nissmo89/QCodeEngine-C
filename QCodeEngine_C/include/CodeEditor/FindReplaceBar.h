@@ -22,6 +22,22 @@
 #include <utility>
 #include "CodeEditor/EditorTheme.h"
 
+namespace {
+static QColor frSurfaceColor(const QEditorTheme &t)
+{
+    QColor base = t.background.isValid() ? t.background : QColor(30, 30, 30);
+    return base.lightness() < 128 ? base.lighter(108) : base.darker(103);
+}
+
+static QColor frInputColor(const QEditorTheme &t)
+{
+    QColor base = t.currentLineBackground.isValid() ? t.currentLineBackground
+                                                    : (t.background.isValid() ? t.background
+                                                                              : QColor(36, 36, 36));
+    return base.lightness() < 128 ? base.lighter(106) : base.darker(104);
+}
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Small styled icon-button used throughout the bar
 // ─────────────────────────────────────────────────────────────────────────────
@@ -101,6 +117,21 @@ public:
     }
 
     void setTheme(const QEditorTheme &t) {
+        const QColor lineBg = frInputColor(t);
+        const QColor border = t.gutterBorderColor.isValid()
+                                ? t.gutterBorderColor
+                                : QColor(90, 90, 90);
+        const QColor fg = t.foreground.isValid() ? t.foreground : QColor(220, 220, 220);
+        const QColor selectionBg = t.selectionBackground.isValid()
+                                     ? t.selectionBackground
+                                     : QColor(88, 112, 178);
+        const QColor focusBorder = t.accent.isValid()
+                                     ? t.accent
+                                     : (t.tokenKeyword.isValid() ? t.tokenKeyword : border.lighter(125));
+        const QColor placeholder = t.tokenComment.isValid()
+                                     ? t.tokenComment
+                                     : fg.darker(130);
+
         QString qss = QString(
                           "QLineEdit {"
                           "  background: %1;"
@@ -109,17 +140,21 @@ public:
                           "  border-radius: 4px;"
                           "  padding: 0 6px;"
                           "  selection-background-color: %4;"
+                          "  selection-color: %5;"
+                          "}"
+                          "QLineEdit::placeholder {"
+                          "  color: %6;"
                           "}"
                           "QLineEdit:focus {"
-                          "  border: 1px solid %5;"
+                          "  border: 1px solid %7;"
                           "}"
-                          ).arg(t.background.lighter(115).name())
-                          .arg(t.foreground.name())
-                          .arg(t.gutterBorderColor.isValid()
-                                   ? t.gutterBorderColor.name()
-                                   : "#555")
-                          .arg(t.selectionBackground.name())
-                          .arg(t.tokenKeyword.name());
+                          ).arg(lineBg.name(QColor::HexArgb))
+                          .arg(fg.name())
+                          .arg(border.name())
+                          .arg(selectionBg.name())
+                          .arg(fg.name())
+                          .arg(placeholder.name())
+                          .arg(focusBorder.name());
         setStyleSheet(qss);
     }
 
@@ -159,10 +194,11 @@ public:
     explicit FindReplaceBar(QWidget *parent = nullptr)
         : QWidget(parent)
     {
-        // ── window flags: stays inside the editor, no frame ────────────────
-        setAttribute(Qt::WA_TranslucentBackground);
-        setAttribute(Qt::WA_NoSystemBackground);
+        // ── surface config: solid in-editor panel (avoids compositor ghosting) ─
+        setAttribute(Qt::WA_StyledBackground, true);
         setFocusPolicy(Qt::StrongFocus);
+        if (parentWidget())
+            parentWidget()->installEventFilter(this);
 
         // ── opacity effect for fade-in / fade-out ──────────────────────────
         m_opacity = new QGraphicsOpacityEffect(this);
@@ -245,34 +281,32 @@ protected:
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
 
-        // shadow strip at top
-        QLinearGradient shadow(0, 0, 0, height());
-        shadow.setColorAt(0, QColor(0,0,0,40));
-        shadow.setColorAt(1, QColor(0,0,0,0));
-        p.fillRect(rect(), shadow);
+        const QColor editorBg = m_theme.background.isValid()
+                                  ? m_theme.background
+                                  : QColor(28, 28, 28);
+        p.fillRect(rect(), editorBg);
 
         // main background panel
-        QRectF r = rect().adjusted(8, 4, -8, -2);
+        QRectF r = rect().adjusted(8, 4, -8, -4);
         QPainterPath path;
         path.addRoundedRect(r, 6, 6);
 
-        // subtle drop-shadow
-        for (int i = 1; i <= 4; ++i) {
-            p.setPen(QPen(QColor(0,0,0, 30 - i*6), 1));
-            p.setBrush(Qt::NoBrush);
-            p.drawRoundedRect(r.adjusted(-i, -i+1, i, i+1), 6, 6);
-        }
-
-        QColor bg = m_theme.background.isValid() ? m_theme.background
-                                                 : QColor(30,30,30);
-        bg = bg.lightness() < 128 ? bg.lighter(118) : bg.darker(106);
-        bg.setAlpha(252);
+        QColor bg = frSurfaceColor(m_theme);
+        bg.setAlpha(255);
         p.fillPath(path, bg);
 
         QColor border = m_theme.gutterBorderColor.isValid()
                             ? m_theme.gutterBorderColor : QColor(80,80,80);
         p.setPen(QPen(border, 1));
         p.drawPath(path);
+
+        // subtle seam so the bar feels attached to editor chrome
+        QColor seam = m_theme.gutterBorderColor.isValid()
+                        ? m_theme.gutterBorderColor
+                        : QColor(70, 70, 70);
+        seam.setAlpha(120);
+        p.setPen(seam);
+        p.drawLine(QPointF(8, 1), QPointF(width() - 8, 1));
     }
 
     void keyPressEvent(QKeyEvent *e) override {
@@ -301,6 +335,22 @@ protected:
     void resizeEvent(QResizeEvent *e) override {
         QWidget::resizeEvent(e);
         repositionToParent();
+    }
+
+    bool eventFilter(QObject *watched, QEvent *event) override {
+        if (watched == parentWidget()) {
+            switch (event->type()) {
+            case QEvent::Resize:
+            case QEvent::Show:
+            case QEvent::WindowStateChange:
+            case QEvent::LayoutRequest:
+                repositionToParent();
+                break;
+            default:
+                break;
+            }
+        }
+        return QWidget::eventFilter(watched, event);
     }
 
 private slots:
@@ -664,12 +714,22 @@ private:
 
     void repositionToParent() {
         if (!parentWidget()) return;
-        int pw = parentWidget()->width();
-        int bw = qMin(pw - 20, 600);   // max 600px wide, 10px from each edge
-        int bh = sizeHint().height();
-        // Top-right, 10px from the right edge, 10px from the top
-        move(pw - bw - 10, 10);
-        resize(bw, bh);
+        const int marginX = 10;
+        const int marginY = 10;
+        const int maxWidth = 600;
+
+        const int pw = qMax(0, parentWidget()->width());
+        const int ph = qMax(0, parentWidget()->height());
+        const int availableW = qMax(1, pw - (marginX * 2));
+        const int bw = qMin(maxWidth, availableW);
+        const int bh = qMax(minimumSizeHint().height(), sizeHint().height());
+
+        const int xMax = qMax(0, pw - bw);
+        const int yMax = qMax(0, ph - bh);
+        const int x = qBound(0, pw - bw - marginX, xMax);
+        const int y = qBound(0, marginY, yMax);
+
+        setGeometry(x, y, bw, bh);
     }
 
     void clearHighlights() {
