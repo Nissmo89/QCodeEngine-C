@@ -13,6 +13,7 @@
 #include <QScrollBar>
 #include <QSignalBlocker>
 #include <QThread>
+#include <QToolTip>
 #include <memory>
 #include <algorithm>
 #include <utility>
@@ -215,6 +216,59 @@ static int largeDocumentHighlightRadius(const QPlainTextEdit* editor)
     return qBound(160, radius, 420);
 }
 
+struct FoldChipVisual {
+    QString label;
+    QRect rect;
+};
+
+static QString foldedChipLabelForHiddenLines(int hiddenLines)
+{
+    if (hiddenLines <= 0)
+        return QStringLiteral("+ folded");
+    if (hiddenLines == 1)
+        return QStringLiteral("+ 1 line");
+    return QStringLiteral("+ %1 lines").arg(hiddenLines);
+}
+
+static QString foldedChipTooltipForHiddenLines(int hiddenLines)
+{
+    if (hiddenLines <= 0)
+        return QStringLiteral("Click to expand folded block");
+    if (hiddenLines == 1)
+        return QStringLiteral("Click to expand 1 hidden line");
+    return QStringLiteral("Click to expand %1 hidden lines").arg(hiddenLines);
+}
+
+static FoldChipVisual buildFoldChipVisual(const QString& blockText,
+                                          int hiddenLines,
+                                          const QFontMetrics& fm,
+                                          int tabWidth,
+                                          int viewportWidth,
+                                          int contentOffsetX,
+                                          int blockTop,
+                                          int blockHeight)
+{
+    FoldChipVisual out;
+    out.label = foldedChipLabelForHiddenLines(hiddenLines);
+
+    QString expandedText = blockText;
+    expandedText.replace(QLatin1Char('\t'), QString(tabWidth, QLatin1Char(' ')));
+
+    const int textWidth = fm.horizontalAdvance(expandedText);
+    const int padX = 8;
+    const int padY = 3;
+    const int chipW = fm.horizontalAdvance(out.label) + padX * 2;
+    const int chipH = qMax(fm.height() + padY * 2, blockHeight - 8);
+
+    int chipX = contentOffsetX + textWidth + 10;
+    const int maxX = qMax(6, viewportWidth - chipW - 6);
+    chipX = qBound(6, chipX, maxX);
+
+    const int chipY = blockTop + qMax(0, (blockHeight - chipH) / 2);
+    out.rect = QRect(chipX, chipY, chipW, chipH);
+    return out;
+}
+
 } // namespace
 
 // ── Format map ───────────────────────────────────────────────────────────────
@@ -269,7 +323,11 @@ static void applyEditorStyle(QPlainTextEdit* editor, int lineHeightPx = 26) {
 // ── InnerEditor ──────────────────────────────────────────────────────────────
 
 InnerEditor::InnerEditor(CodeEditorPrivate* d, QWidget* parent)
-    : QPlainTextEdit(parent), d_ptr(d) {}
+    : QPlainTextEdit(parent), d_ptr(d)
+{
+    setMouseTracking(true);
+    viewport()->setMouseTracking(true);
+}
 
 void InnerEditor::keyPressEvent(QKeyEvent* e) {
     if (d_ptr->dispatchPluginKeyPress(e)) return;
@@ -281,8 +339,66 @@ void InnerEditor::keyPressEvent(QKeyEvent* e) {
         d_ptr->m_completer->updatePopup();
 }
 
+bool InnerEditor::foldedChipAt(const QPoint& pos, int* foldStart, QRect* chipRect, int* hiddenLines) const
+{
+    if (!d_ptr || !d_ptr->m_foldingEnabled || !d_ptr->m_foldManager)
+        return false;
+
+    const QMap<int, int>& foldRanges = d_ptr->m_foldManager->foldRanges();
+    if (foldRanges.isEmpty())
+        return false;
+
+    QFontMetrics fm(font());
+    QTextBlock block = firstVisibleBlock();
+    int blockNumber = block.blockNumber();
+    qreal top = blockBoundingGeometry(block).translated(contentOffset()).top();
+    qreal bottom = top + blockBoundingRect(block).height();
+    const int viewportWidth = viewport()->width();
+    const int contentX = static_cast<int>(contentOffset().x());
+
+    while (block.isValid() && top <= viewport()->height()) {
+        if (block.isVisible() && bottom >= 0 && d_ptr->m_foldManager->isFolded(blockNumber)) {
+            const auto it = foldRanges.constFind(blockNumber);
+            if (it != foldRanges.constEnd()) {
+                const int hidden = qMax(0, it.value() - blockNumber - 1);
+                const int blockTop = static_cast<int>(top);
+                const int blockHeight = qMax(1, static_cast<int>(bottom - top));
+                const FoldChipVisual chip = buildFoldChipVisual(
+                    block.text(), hidden, fm, d_ptr->m_tabWidth,
+                    viewportWidth, contentX, blockTop, blockHeight);
+                if (chip.rect.contains(pos)) {
+                    if (foldStart) *foldStart = blockNumber;
+                    if (chipRect) *chipRect = chip.rect;
+                    if (hiddenLines) *hiddenLines = hidden;
+                    return true;
+                }
+            }
+        }
+
+        block = block.next();
+        top = bottom;
+        bottom = top + blockBoundingRect(block).height();
+        ++blockNumber;
+    }
+
+    return false;
+}
+
 void InnerEditor::mousePressEvent(QMouseEvent* e)
 {
+    if (e->button() == Qt::LeftButton && !(e->modifiers() & Qt::AltModifier)
+        && d_ptr->m_foldingEnabled && d_ptr->m_foldManager) {
+        int foldStart = -1;
+        if (foldedChipAt(e->position().toPoint(), &foldStart, nullptr, nullptr) && foldStart >= 0) {
+            d_ptr->m_foldManager->toggleFold(foldStart);
+            m_hoveredFoldStart = -1;
+            QToolTip::hideText();
+            viewport()->unsetCursor();
+            e->accept();
+            return;
+        }
+    }
+
     if (e->button() == Qt::LeftButton && (e->modifiers() & Qt::AltModifier)) {
         const int pos = cursorForPosition(e->position().toPoint()).position();
         d_ptr->addExtraCursorAtPosition(pos, true);
@@ -296,6 +412,54 @@ void InnerEditor::mousePressEvent(QMouseEvent* e)
         d_ptr->clearExtraCursors();
 
     QPlainTextEdit::mousePressEvent(e);
+}
+
+void InnerEditor::mouseMoveEvent(QMouseEvent* e)
+{
+    QPlainTextEdit::mouseMoveEvent(e);
+
+    if (e->buttons() != Qt::NoButton) {
+        if (m_hoveredFoldStart != -1) {
+            m_hoveredFoldStart = -1;
+            viewport()->update();
+        }
+        QToolTip::hideText();
+        viewport()->unsetCursor();
+        return;
+    }
+
+    int foldStart = -1;
+    int hiddenLines = 0;
+    QRect chipRect;
+    const bool hoveringChip = !(e->modifiers() & Qt::AltModifier)
+                           && foldedChipAt(e->position().toPoint(), &foldStart, &chipRect, &hiddenLines);
+
+    const int newHover = hoveringChip ? foldStart : -1;
+    if (newHover != m_hoveredFoldStart) {
+        m_hoveredFoldStart = newHover;
+        viewport()->update();
+    }
+
+    if (hoveringChip) {
+        viewport()->setCursor(Qt::PointingHandCursor);
+        QToolTip::showText(e->globalPosition().toPoint(),
+                           foldedChipTooltipForHiddenLines(hiddenLines),
+                           viewport(), chipRect);
+    } else {
+        viewport()->unsetCursor();
+        QToolTip::hideText();
+    }
+}
+
+void InnerEditor::leaveEvent(QEvent* e)
+{
+    if (m_hoveredFoldStart != -1) {
+        m_hoveredFoldStart = -1;
+        viewport()->update();
+    }
+    viewport()->unsetCursor();
+    QToolTip::hideText();
+    QPlainTextEdit::leaveEvent(e);
 }
 
 void InnerEditor::paintEvent(QPaintEvent* e) {
@@ -385,27 +549,56 @@ void InnerEditor::paintEvent(QPaintEvent* e) {
     painter.setFont(font());
     QFontMetrics fm(font());
 
-    if (d_ptr->m_foldingEnabled) {
+    if (d_ptr->m_foldingEnabled && d_ptr->m_foldManager) {
+        const QMap<int, int>& foldRanges = d_ptr->m_foldManager->foldRanges();
         QTextBlock block = firstVisibleBlock();
         int  blockNumber = block.blockNumber();
         qreal top    = blockBoundingGeometry(block).translated(contentOffset()).top();
         qreal bottom = top + blockBoundingRect(block).height();
+        const int viewportWidth = viewport()->width();
+        const int contentX = static_cast<int>(contentOffset().x());
 
         while (block.isValid() && top <= e->rect().bottom()) {
             if (block.isVisible() && bottom >= e->rect().top()) {
                 if (d_ptr->m_foldManager->isFolded(blockNumber)) {
-                    // Measure the existing line text to place hint after it
-                    const int textW = fm.horizontalAdvance(
-                        block.text().replace('\t', QString(d_ptr->m_tabWidth, ' ')));
-                    const int blockH = static_cast<int>(bottom - top);
+                    const auto it = foldRanges.constFind(blockNumber);
+                    if (it != foldRanges.constEnd()) {
+                        const int hiddenLines = qMax(0, it.value() - blockNumber - 1);
+                        const int blockTop = static_cast<int>(top);
+                        const int blockHeight = qMax(1, static_cast<int>(bottom - top));
+                        const FoldChipVisual chip = buildFoldChipVisual(
+                            block.text(), hiddenLines, fm, d_ptr->m_tabWidth,
+                            viewportWidth, contentX, blockTop, blockHeight);
+                        const bool hovered = (m_hoveredFoldStart == blockNumber);
 
-                    painter.save();
-                    painter.setPen(d_ptr->m_theme.tokenComment);
-                    painter.drawText(textW + 8, static_cast<int>(top),
-                                     fm.horizontalAdvance(" ...}"), blockH,
-                                     Qt::AlignLeft | Qt::AlignVCenter,
-                                     " ...}");
-                    painter.restore();
+                        QColor chipBg = d_ptr->m_theme.tokenComment.isValid()
+                                      ? d_ptr->m_theme.tokenComment
+                                      : d_ptr->m_theme.foreground;
+                        chipBg.setAlpha(hovered ? 95 : 56);
+
+                        QColor chipBorder = d_ptr->m_theme.accent.isValid()
+                                          ? d_ptr->m_theme.accent
+                                          : d_ptr->m_theme.tokenComment;
+                        if (!chipBorder.isValid())
+                            chipBorder = d_ptr->m_theme.foreground;
+                        chipBorder.setAlpha(hovered ? 220 : 150);
+
+                        QColor chipText = d_ptr->m_theme.foreground.isValid()
+                                        ? d_ptr->m_theme.foreground
+                                        : QColor(230, 230, 230);
+                        chipText.setAlpha(hovered ? 245 : 220);
+
+                        painter.save();
+                        painter.setRenderHint(QPainter::Antialiasing, true);
+                        painter.setPen(QPen(chipBorder, 1));
+                        painter.setBrush(chipBg);
+                        painter.drawRoundedRect(chip.rect, 6, 6);
+                        painter.setPen(chipText);
+                        painter.drawText(chip.rect.adjusted(8, 0, -8, 0),
+                                         Qt::AlignLeft | Qt::AlignVCenter,
+                                         chip.label);
+                        painter.restore();
+                    }
                 }
             }
             block = block.next();

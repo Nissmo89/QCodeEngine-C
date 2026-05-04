@@ -18,6 +18,7 @@
 
 class QKeyEvent;
 class QMouseEvent;
+class QEvent;
 
 // Forward declarations for future stages
 // class QSyntaxHighlighter_TS;
@@ -45,10 +46,15 @@ public:
 protected:
     void keyPressEvent(QKeyEvent* e) override;
     void mousePressEvent(QMouseEvent* e) override;
+    void mouseMoveEvent(QMouseEvent* e) override;
+    void leaveEvent(QEvent* e) override;
     void paintEvent(QPaintEvent* e) override;
 
 private:
+    bool foldedChipAt(const QPoint& pos, int* foldStart, QRect* chipRect, int* hiddenLines) const;
+
     CodeEditorPrivate* d_ptr;
+    int m_hoveredFoldStart = -1;
 };
 
 class CodeEditorPrivate : public QObject {
