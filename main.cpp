@@ -14,12 +14,14 @@ int main(int argc, char* argv[]) {
 
     QMainWindow mainWindow;
     mainWindow.resize(1000, 720);
-    mainWindow.setWindowTitle("QCodeEditor - One Dark");
+    mainWindow.setWindowTitle("QCodeEditor - Monokai Pro Light (Filter Sun)");
 
     CodeEditor* editor = new CodeEditor(&mainWindow);
 
-    // Use One Dark theme (Zed-style)
-    editor->setTheme(QEditorTheme::oneDarkTheme());
+    // Use Monokai Pro Light (Filter Sun)
+    editor->setTheme(QEditorTheme::own_theme());
+
+    // QObject::connect(editor,&CodeEditor::)
 
     // Configure features
     editor->setLineNumbersVisible(true);

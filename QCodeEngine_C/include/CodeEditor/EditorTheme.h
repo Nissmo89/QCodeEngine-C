@@ -72,6 +72,7 @@ struct QEditorTheme {
     int     fontSize   = 13;
 
     // Static constructors
+    static QEditorTheme own_theme();
     static QEditorTheme cursorDarkTheme();
     static QEditorTheme draculaTheme();
     static QEditorTheme monokaiTheme();

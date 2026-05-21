@@ -282,9 +282,9 @@ static FormatMap generateFormatMap(const QEditorTheme& theme) {
         if (italic) fmt.setFontItalic(true);
         return fmt;
     };
-    fmap["keyword"]               = makeFormat(theme.tokenKeyword, theme.keywordBold);
-    fmap["keyword.control"]       = makeFormat(theme.tokenKeywordControl, theme.keywordBold);
-    fmap["keyword.preproc"]       = makeFormat(theme.tokenKeywordPreproc, theme.keywordBold);
+    fmap["keyword"]               = makeFormat(theme.tokenKeyword); //theme.keywordBold
+    fmap["keyword.control"]       = makeFormat(theme.tokenKeywordControl); //theme.keywordBold
+    fmap["keyword.preproc"]       = makeFormat(theme.tokenKeywordPreproc); //theme.keywordBold
     fmap["preproc"]               = makeFormat(theme.tokenKeywordPreproc);
     fmap["preproc.arg"]           = makeFormat(theme.tokenPreprocessor);
     fmap["operator"]              = makeFormat(theme.tokenOperator);
@@ -299,9 +299,9 @@ static FormatMap generateFormatMap(const QEditorTheme& theme) {
     fmap["constant"]              = makeFormat(theme.tokenConstant);
     fmap["comment"]               = makeFormat(theme.tokenComment, false, theme.commentItalic);
     fmap["variable"]              = makeFormat(theme.tokenIdentifier);
-    fmap["function"]              = makeFormat(theme.tokenFunction, theme.functionBold);
-    fmap["function.special"]      = makeFormat(theme.tokenKeywordPreproc, theme.functionBold);
-    fmap["type"]                  = makeFormat(theme.tokenType, theme.typeBold);
+    fmap["function"]              = makeFormat(theme.tokenFunction); //theme.functionBold
+    fmap["function.special"]      = makeFormat(theme.tokenKeywordPreproc); //theme.functionBold
+    fmap["type"]                  = makeFormat(theme.tokenType); // theme.typeBold
     fmap["property"]              = makeFormat(theme.tokenField);
     fmap["label"]                 = makeFormat(theme.tokenLabel);
     fmap["attribute"]             = makeFormat(theme.tokenAttribute);
@@ -1837,7 +1837,8 @@ bool CodeEditorPrivate::handleKeyPress(QKeyEvent* event) {
         static const std::function<QEditorTheme()> themes[] = {
             QEditorTheme::oneDarkTheme, QEditorTheme::draculaTheme,
             QEditorTheme::monokaiTheme, QEditorTheme::solarizedDarkTheme,
-            QEditorTheme::githubLightTheme, QEditorTheme::cursorDarkTheme
+            QEditorTheme::githubLightTheme, QEditorTheme::cursorDarkTheme,
+            QEditorTheme::cursorDarkTheme
         };
         themeIndex = (themeIndex + 1) % (int)(sizeof(themes)/sizeof(themes[0]));
         q_ptr->setTheme(themes[themeIndex]());

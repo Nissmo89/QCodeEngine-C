@@ -4,6 +4,79 @@
 #include <QFile>
 
 
+QEditorTheme QEditorTheme::own_theme() {
+    QEditorTheme t;
+    t.name = "Monokai Pro Light (Filter Sun)";
+
+    // UI Colors
+    t.background = QColor("#F8EFE7");
+    t.foreground = QColor("#2C232E");
+    t.selectionBackground = QColor("#2672696D"); // VS Code #72696d26
+    t.selectionForeground = QColor("#2C232E");
+    t.currentLineBackground = QColor("#0C2C232E"); // VS Code #2c232e0c
+    t.lineNumberForeground = QColor("#BEB5B3");
+    t.accent = QColor("#CE4770");
+    t.gutterBackground = QColor("#F8EFE7");
+    t.gutterForeground = QColor("#BEB5B3");
+    t.gutterBorderColor = QColor("#DED5D0");
+    t.gutterActiveLineNumber = QColor("#72696D");
+    t.bracketMatchBackground = QColor("#26A59C9C");
+    t.bracketMatchForeground = QColor("#A59C9C");
+    t.bracketMismatchBackground = QColor("#CE4770");
+
+    // Syntax Tokens
+    t.tokenKeyword         = QColor("#CE4770");        // @keyword
+    t.tokenKeywordControl  = QColor("#CE4770");        // @keyword.control
+    t.tokenKeywordPreproc  = QColor("#6851A2");        // @keyword.preproc / meta.preprocessor
+    t.tokenType            = QColor("#2473B6");        // @type / storage.type
+    t.tokenString          = QColor("#B16803");        // @string
+    t.tokenNumber          = QColor("#6851A2");        // @number
+    t.tokenComment         = QColor("#A59C9C");        // @comment
+    t.tokenPreprocessor    = QColor("#6851A2");        // @preproc / preproc.arg
+    t.tokenFunction        = QColor("#218871");        // @function
+    t.tokenFunctionCall    = QColor("#218871");        // call-site functions
+    t.tokenIdentifier      = QColor("#2C232E");        // @variable
+    t.tokenField           = QColor("#2C232E");        // @property
+    t.tokenEscape          = QColor("#6851A2");        // @string.escape
+    t.tokenOperator        = QColor("#CE4770");        // @operator
+    t.tokenPunctuation     = QColor("#92898A");        // @punctuation.delimiter / bracket
+    t.tokenBoolean         = QColor("#6851A2");        // @boolean
+    t.tokenConstantBuiltin = QColor("#2473B6");        // @constant.builtin
+    t.tokenConstant        = QColor("#6851A2");        // @constant
+    t.tokenAttribute       = QColor("#2473B6");        // @attribute
+    t.tokenLabel           = QColor("#6851A2");        // @label
+
+    // Search & Highlights
+    t.searchHighlightBackground = QColor("#262C232E"); // VS Code #2c232e26
+    t.searchHighlightForeground = QColor("#2C232E");
+    t.searchCurrentMatchBackground = QColor("#33B16803");
+
+    // Minimap & Indent Guides
+    t.minimapBackground = QColor("#F8EFE7");
+    t.minimapViewportColor = QColor("#2672696D"); // VS Code #72696d26
+    t.indentGuideColor = QColor("#D2C9C4");
+
+    // Rainbow Brackets
+    t.rainbowColors = {
+        QColor("#CE4770"),
+        QColor("#D4572B"),
+        QColor("#B16803"),
+        QColor("#218871"),
+        QColor("#2473B6"),
+        QColor("#6851A2")
+    };
+
+    t.diagnosticError   = QColor("#CE4770");
+    t.diagnosticWarning = QColor("#D4572B");
+    t.diagnosticInfo    = QColor("#2473B6");
+    t.diagnosticHint    = QColor("#6851A2");
+
+    t.fontFamily = "JetBrains Mono";
+    t.fontSize   = 14;
+
+    return t;
+}
+
 QEditorTheme QEditorTheme::cursorDarkTheme() {
     QEditorTheme t;
     t.name = "Cursor Dark";
