@@ -1753,6 +1753,31 @@ void CodeEditorPrivate::setFoldingEnabled(bool enabled)
 }
 
 void CodeEditorPrivate::updateCurrentLineHighlight() {
+    auto sanitizeSelections = [this](const QList<QTextEdit::ExtraSelection>& in) {
+        QList<QTextEdit::ExtraSelection> out;
+        if (!m_editor || !m_editor->document() || in.isEmpty())
+            return out;
+
+        QTextDocument* doc = m_editor->document();
+        const int maxPos = qMax(0, doc->characterCount() - 1);
+        out.reserve(in.size());
+        for (const QTextEdit::ExtraSelection& sel : in) {
+            const QTextCursor cursor = sel.cursor;
+            if (cursor.isNull() || cursor.document() != doc)
+                continue;
+
+            QTextEdit::ExtraSelection normalized = sel;
+            QTextCursor safe(doc);
+            const int anchor = qBound(0, cursor.anchor(), maxPos);
+            const int pos = qBound(0, cursor.position(), maxPos);
+            safe.setPosition(anchor);
+            safe.setPosition(pos, QTextCursor::KeepAnchor);
+            normalized.cursor = safe;
+            out.append(normalized);
+        }
+        return out;
+    };
+
     QList<QTextEdit::ExtraSelection> extras;
     if (!m_editor->isReadOnly()) {
         QTextEdit::ExtraSelection sel;
@@ -1768,7 +1793,7 @@ void CodeEditorPrivate::updateCurrentLineHighlight() {
     extras.append(multiCursorSelections());
     extras.append(m_bracketSelections);
     extras.append(m_searchSelections);
-    m_editor->setExtraSelections(extras);
+    m_editor->setExtraSelections(sanitizeSelections(extras));
 }
 
 void CodeEditorPrivate::updateBracketMatch() {
@@ -1991,6 +2016,14 @@ void CodeEditorPrivate::onTextChanged()
         normalizeExtraCursors();
         updateCurrentLineHighlight();
     }
+
+    // Search highlights from API-driven find operations are static snapshots.
+    // Drop them after edits when the interactive search bar is not visible.
+    if (!m_searchSelections.isEmpty() && (!m_searchBar || !m_searchBar->isVisible())) {
+        m_searchSelections.clear();
+        updateCurrentLineHighlight();
+    }
+
     if (!m_largeFileMode && !m_asyncLoadInProgress) {
         const qint64 approxBytes = static_cast<qint64>(m_editor->document()->characterCount()) * 2;
         if (m_largeDocumentMode != shouldUseLargeDocumentMode(approxBytes))
@@ -2469,24 +2502,72 @@ void CodeEditor::replaceAll(const QString& term, const QString& replacement) {
     const bool caseSensitive = reuseLastOptions ? d_ptr->m_lastSearchCaseSensitive : false;
     const bool regex = reuseLastOptions ? d_ptr->m_lastSearchRegex : false;
 
-    QTextCursor cur(d_ptr->m_editor->document());
+    QTextDocument* doc = d_ptr->m_editor->document();
+    if (!doc || term.isEmpty()) {
+        findNext(term, caseSensitive, regex);
+        return;
+    }
+
     QTextDocument::FindFlags flags;
     if (caseSensitive)
         flags |= QTextDocument::FindCaseSensitively;
     const QRegularExpression re = buildSearchRegex(term, caseSensitive);
 
-    cur.beginEditBlock();
+    struct ReplaceSpan {
+        int start = 0;
+        int end = 0;
+        QString replacement;
+    };
+
+    QVector<ReplaceSpan> spans;
+    QTextCursor cur(doc);
+    const int scanMaxPos = qMax(0, doc->characterCount() - 1);
+    int guardPos = -1;
     while (true) {
-        cur = regex ? d_ptr->m_editor->document()->find(re, cur)
-                    : d_ptr->m_editor->document()->find(term, cur, flags);
+        cur = regex ? doc->find(re, cur)
+                    : doc->find(term, cur, flags);
         if (cur.isNull())
             break;
 
-        const QString selectedText = cur.selectedText();
-        cur.insertText(buildReplacementText(
-            selectedText, term, replacement, caseSensitive, regex));
+        const int matchStart = cur.selectionStart();
+        const int matchEnd = cur.selectionEnd();
+        if (matchEnd <= matchStart) {
+            const int nextPos = qMin(matchStart + 1, scanMaxPos);
+            if (nextPos <= guardPos)
+                break;
+            guardPos = nextPos;
+            cur.setPosition(nextPos);
+            continue;
+        }
+
+        spans.append({matchStart, matchEnd,
+                      buildReplacementText(cur.selectedText(), term, replacement, caseSensitive, regex)});
+        guardPos = matchEnd;
+        cur.setPosition(matchEnd);
     }
-    cur.endEditBlock();
+
+    if (!spans.isEmpty()) {
+        const QString source = doc->toPlainText();
+        QString replacedText;
+        replacedText.reserve(source.size());
+
+        int sourcePos = 0;
+        for (const ReplaceSpan& span : spans) {
+            if (span.start < sourcePos || span.end < span.start || span.end > source.size())
+                continue;
+            replacedText += source.mid(sourcePos, span.start - sourcePos);
+            replacedText += span.replacement;
+            sourcePos = span.end;
+        }
+        replacedText += source.mid(sourcePos);
+
+        QTextCursor writer(doc);
+        writer.beginEditBlock();
+        writer.select(QTextCursor::Document);
+        writer.insertText(replacedText);
+        writer.endEditBlock();
+    }
+
     findNext(term, caseSensitive, regex);
 }
 

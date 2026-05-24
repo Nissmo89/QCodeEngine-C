@@ -18,6 +18,8 @@
 #include <QRegularExpression>
 #include <QTimer>
 #include <QGraphicsOpacityEffect>
+#include <QScopedValueRollback>
+#include <QVector>
 #include <functional>
 #include <utility>
 #include "CodeEditor/EditorTheme.h"
@@ -226,7 +228,29 @@ public:
     // ── Public API ─────────────────────────────────────────────────────────
 
     void setEditor(QPlainTextEdit *editor) {
+        if (m_docChangeConnection)
+            QObject::disconnect(m_docChangeConnection);
+
         m_editor = editor;
+        if (!m_editor || !m_editor->document())
+            return;
+
+        m_docChangeConnection = connect(m_editor->document(), &QTextDocument::contentsChanged,
+                                        this, [this]() {
+            if (m_replaceInProgress)
+                return;
+
+            if (!isVisible() || m_findEdit->text().isEmpty()) {
+                clearHighlights();
+                updateMatchLabel();
+                return;
+            }
+
+            // Drop stale match cursors immediately after any mutation so repaints
+            // never run with pre-edit selections while debounce is pending.
+            clearHighlightSelectionsOnly();
+            m_searchTimer->start();
+        });
     }
 
     void setTheme(const QEditorTheme &theme) {
@@ -385,10 +409,22 @@ private slots:
         m_highlightsTruncated = false;
         int count = 0, currentIndex = 0;
         QTextCursor editorCursor = m_editor->textCursor();
+        int guardPos = -1;
 
         while (true) {
             cur = findIn(doc, needle, cur, flags);
             if (cur.isNull()) break;
+            const int matchStart = cur.selectionStart();
+            const int matchEnd = cur.selectionEnd();
+            if (matchEnd <= matchStart) {
+                const int nextPos = qMin(matchStart + 1, qMax(0, doc->characterCount() - 1));
+                if (nextPos <= guardPos)
+                    break;
+                guardPos = nextPos;
+                cur.setPosition(nextPos);
+                continue;
+            }
+            guardPos = matchEnd;
             ++count;
 
             if (m_maxHighlights > 0 && highlights.size() >= m_maxHighlights) {
@@ -468,6 +504,8 @@ private slots:
         const QString needle  = m_findEdit->text();
         const QString replace = m_replaceEdit->text();
         if (needle.isEmpty()) return;
+        clearHighlightSelectionsOnly();
+        QScopedValueRollback<bool> replaceGuard(m_replaceInProgress, true);
 
         QTextCursor cur = m_editor->textCursor();
 
@@ -478,7 +516,10 @@ private slots:
 
             if (m_btnRegex->isActive()) {
                 QRegularExpression re = buildRegex(needle);
-                matches = re.match(sel).hasMatch();
+                QRegularExpressionMatch m = re.match(sel);
+                matches = m.hasMatch()
+                          && m.capturedStart() == 0
+                          && m.capturedLength() == sel.size();
             } else {
                 Qt::CaseSensitivity cs = m_btnCase->isActive()
                 ? Qt::CaseSensitive
@@ -501,24 +542,93 @@ private slots:
         const QString needle  = m_findEdit->text();
         const QString replace = m_replaceEdit->text();
         if (needle.isEmpty()) return;
+        clearHighlightSelectionsOnly();
+        QScopedValueRollback<bool> replaceGuard(m_replaceInProgress, true);
 
         QTextDocument *doc = m_editor->document();
-        QTextCursor    cur(doc);
         QTextDocument::FindFlags flags = buildFindFlags(false);
 
-        int count = 0;
-        cur.beginEditBlock();
-        while (true) {
-            cur = findIn(doc, needle, cur, flags);
-            if (cur.isNull()) break;
-            ++count;
-            cur.insertText(buildReplacement(needle, replace, cur));
-        }
-        cur.endEditBlock();
+        struct ReplaceSpan {
+            int start = 0;
+            int end = 0;
+            QString replacement;
+        };
 
-        m_matchLabel->setText(count > 0
-                                  ? QString("%1 replaced").arg(count)
-                                  : "No matches");
+        QVector<ReplaceSpan> spans;
+        QTextCursor scan(doc);
+        const int scanMaxPos = qMax(0, doc->characterCount() - 1);
+        int guardPos = -1;
+        while (true) {
+            scan = findIn(doc, needle, scan, flags);
+            if (scan.isNull())
+                break;
+
+            const int matchStart = scan.selectionStart();
+            const int matchEnd = scan.selectionEnd();
+            if (matchEnd <= matchStart) {
+                const int nextPos = qMin(matchStart + 1, scanMaxPos);
+                if (nextPos <= guardPos)
+                    break;
+                guardPos = nextPos;
+                scan.setPosition(nextPos);
+                continue;
+            }
+
+            spans.append({matchStart, matchEnd, buildReplacement(needle, replace, scan)});
+            guardPos = matchEnd;
+            scan.setPosition(matchEnd);
+        }
+
+        if (spans.isEmpty()) {
+            m_matchLabel->setText("No matches");
+            doHighlightAll();
+            return;
+        }
+
+        const QString source = doc->toPlainText();
+        QString replacedText;
+        replacedText.reserve(source.size());
+
+        int sourcePos = 0;
+        int appliedCount = 0;
+        ReplaceSpan firstApplied;
+        bool haveFirstApplied = false;
+        for (const ReplaceSpan& span : spans) {
+            if (span.start < sourcePos || span.end < span.start || span.end > source.size())
+                continue;
+            replacedText += source.mid(sourcePos, span.start - sourcePos);
+            replacedText += span.replacement;
+            sourcePos = span.end;
+            if (!haveFirstApplied) {
+                firstApplied = span;
+                haveFirstApplied = true;
+            }
+            ++appliedCount;
+        }
+        replacedText += source.mid(sourcePos);
+
+        if (appliedCount == 0) {
+            m_matchLabel->setText("No matches");
+            doHighlightAll();
+            return;
+        }
+
+        QTextCursor writer(doc);
+        writer.beginEditBlock();
+        writer.select(QTextCursor::Document);
+        writer.insertText(replacedText);
+        writer.endEditBlock();
+
+        const ReplaceSpan first = firstApplied;
+        const int maxPos = qMax(0, doc->characterCount() - 1);
+        const int selStart = qBound(0, first.start, maxPos);
+        const int selEnd = qBound(selStart, first.start + first.replacement.size(), maxPos);
+        QTextCursor selection(doc);
+        selection.setPosition(selStart);
+        selection.setPosition(selEnd, QTextCursor::KeepAnchor);
+        m_editor->setTextCursor(selection);
+
+        m_matchLabel->setText(QString("%1 replaced").arg(appliedCount));
 
         doHighlightAll();
     }
@@ -733,12 +843,16 @@ private:
     }
 
     void clearHighlights() {
-        if (m_highlightsHandler)
-            m_highlightsHandler({});
-        m_savedHighlights.clear();
+        clearHighlightSelectionsOnly();
         m_totalMatches = 0;
         m_currentMatch = 0;
         m_highlightsTruncated = false;
+    }
+
+    void clearHighlightSelectionsOnly() {
+        if (m_highlightsHandler)
+            m_highlightsHandler({});
+        m_savedHighlights.clear();
     }
 
     void updateMatchLabel() {
@@ -852,6 +966,8 @@ private:
     int m_maxHighlights = 0;
     bool m_highlightsTruncated = false;
     std::function<void(const QList<QTextEdit::ExtraSelection>&)> m_highlightsHandler;
+    QMetaObject::Connection m_docChangeConnection;
+    bool m_replaceInProgress = false;
 };
 
 #endif // FINDREPLACEBAR_H
