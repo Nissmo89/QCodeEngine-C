@@ -45,6 +45,8 @@ public:
     void        setAutoCompleteEnabled(bool enabled);
     void        setAutoIndentEnabled(bool enabled);
     void        setAutoBracketEnabled(bool enabled);
+    void        setBracketPairGuidesEnabled(bool enabled);
+    bool        bracketPairGuidesEnabled() const;
     void        setWordWrap(bool enabled);
     void        setShowWhitespace(bool visible);
     void        setTabWidth(int spaces);

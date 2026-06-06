@@ -4,8 +4,11 @@
 #include <QHBoxLayout>
 #include <QFile>
 #include <QFileInfo>
+#include <QFontInfo>
+#include <QFontMetricsF>
 #include <QTextBlock>
 #include <QPainter>
+#include <QPainterPath>
 #include <QMouseEvent>
 #include <QVector>
 #include <QSet>
@@ -149,7 +152,7 @@ static int bracketIndexAtCursor(const QString& s, int cursorPos) {
     return -1;
 }
 
-QString documentSlice(QTextDocument* doc, int start, int end)
+QString documentSlice(const QTextDocument* doc, int start, int end)
 {
     if (!doc)
         return {};
@@ -160,7 +163,7 @@ QString documentSlice(QTextDocument* doc, int start, int end)
     if (end <= start)
         return {};
 
-    QTextCursor cursor(doc);
+    QTextCursor cursor(const_cast<QTextDocument*>(doc));
     cursor.setPosition(start);
     cursor.setPosition(end, QTextCursor::KeepAnchor);
     QString text = cursor.selectedText();
@@ -269,6 +272,259 @@ static FoldChipVisual buildFoldChipVisual(const QString& blockText,
     return out;
 }
 
+static QColor bracketPairGuideColor(const QEditorTheme& theme, int depth, bool active)
+{
+    depth = qMax(0, depth);
+    QColor color;
+    if (!theme.rainbowColors.isEmpty())
+        color = theme.rainbowColors[depth % theme.rainbowColors.size()];
+
+    const QColor fallback[] = {
+        Qt::red,
+        QColor(255, 165, 0),
+        Qt::yellow,
+        Qt::green,
+        Qt::cyan,
+        Qt::magenta
+    };
+    if (!color.isValid())
+        color = fallback[depth % 6];
+
+    color.setAlpha(active ? 235 : 130);
+    return color;
+}
+
+static int textPrefixPixelWidth(const QString& text, const QFontMetrics& fm, int tabWidth)
+{
+    const int safeTabWidth = qMax(1, tabWidth);
+    const int spaceWidth = qMax(1, fm.horizontalAdvance(QLatin1Char(' ')));
+    int width = 0;
+    int column = 0;
+
+    for (QChar ch : text) {
+        if (ch == QLatin1Char('\t')) {
+            const int spaces = safeTabWidth - (column % safeTabWidth);
+            width += spaces * spaceWidth;
+            column += spaces;
+            continue;
+        }
+
+        width += fm.horizontalAdvance(ch);
+        ++column;
+    }
+
+    return width;
+}
+
+static qreal characterCenterPixelX(const QString& text,
+                                   int column,
+                                   const QFontMetrics& fm,
+                                   int tabWidth,
+                                   int contentOffsetX)
+{
+    if (column < 0 || column >= text.size())
+        return contentOffsetX;
+
+    return contentOffsetX
+           + textPrefixPixelWidth(text.left(column), fm, tabWidth)
+           + qMax<qreal>(1.0, fm.horizontalAdvance(text.at(column)) * 0.5);
+}
+
+static bool visiblyDifferent(qreal a, qreal b)
+{
+    return a > b + 0.5 || a < b - 0.5;
+}
+
+struct ActiveBraceFold {
+    int startBlock = -1;
+    int endBlock = -1;
+    int openColumn = -1;
+    int closeColumn = -1;
+    int depth = 0;
+
+    bool isValid() const
+    {
+        return startBlock >= 0
+               && endBlock > startBlock
+               && openColumn >= 0
+               && closeColumn >= 0;
+    }
+};
+
+static int firstNonWhitespaceColumn(const QString& text)
+{
+    for (int i = 0; i < text.size(); ++i) {
+        if (!text.at(i).isSpace())
+            return i;
+    }
+    return -1;
+}
+
+static bool findFoldGuidePrefix(const QTextDocument* doc,
+                                int startBlockNumber,
+                                int endBlockNumber,
+                                QString* outPrefix)
+{
+    if (outPrefix)
+        outPrefix->clear();
+
+    if (!doc || startBlockNumber > endBlockNumber)
+        return false;
+
+    for (int blockNumber = startBlockNumber; blockNumber <= endBlockNumber; ++blockNumber) {
+        const QTextBlock block = doc->findBlockByNumber(blockNumber);
+        if (!block.isValid())
+            break;
+
+        const int column = firstNonWhitespaceColumn(block.text());
+        if (column >= 0) {
+            if (outPrefix)
+                *outPrefix = block.text().left(column);
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool resolveBraceColumnsForFold(const QTextDocument* doc,
+                                       int startBlockNumber,
+                                       int endBlockNumber,
+                                       int* outOpenColumn,
+                                       int* outCloseColumn)
+{
+    if (outOpenColumn)
+        *outOpenColumn = -1;
+    if (outCloseColumn)
+        *outCloseColumn = -1;
+
+    if (!doc || startBlockNumber < 0 || endBlockNumber <= startBlockNumber)
+        return false;
+
+    const QTextBlock openBlock = doc->findBlockByNumber(startBlockNumber);
+    const QTextBlock closeBlock = doc->findBlockByNumber(endBlockNumber);
+    if (!openBlock.isValid() || !closeBlock.isValid())
+        return false;
+
+    const int sliceStart = openBlock.position();
+    const int sliceEnd = closeBlock.position() + closeBlock.text().size();
+    const QString text = documentSlice(doc, sliceStart, sliceEnd);
+    if (text.isEmpty())
+        return false;
+
+    QVector<bool> mask;
+    buildBracketCountableMask(text, mask);
+
+    const int firstLineEnd = text.indexOf(QLatin1Char('\n'));
+    const int searchEnd = (firstLineEnd >= 0) ? firstLineEnd : text.size();
+    for (int i = 0; i < searchEnd; ++i) {
+        if (!mask.at(i) || text.at(i) != QLatin1Char('{'))
+            continue;
+
+        const int closePos = findClosingPartner(text, mask, i);
+        if (closePos < 0)
+            continue;
+
+        const QTextBlock resolvedOpenBlock = doc->findBlock(sliceStart + i);
+        const QTextBlock resolvedCloseBlock = doc->findBlock(sliceStart + closePos);
+        if (!resolvedOpenBlock.isValid() || !resolvedCloseBlock.isValid())
+            continue;
+        if (resolvedOpenBlock.blockNumber() != startBlockNumber
+            || resolvedCloseBlock.blockNumber() != endBlockNumber) {
+            continue;
+        }
+
+        if (outOpenColumn)
+            *outOpenColumn = sliceStart + i - resolvedOpenBlock.position();
+        if (outCloseColumn)
+            *outCloseColumn = sliceStart + closePos - resolvedCloseBlock.position();
+        return true;
+    }
+
+    return false;
+}
+
+static ActiveBraceFold findActiveBraceFold(const QTextDocument* doc,
+                                           const QMap<int, int>& foldRanges,
+                                           int cursorBlockNumber)
+{
+    QVector<ActiveBraceFold> containingFolds;
+
+    for (auto it = foldRanges.constBegin(); it != foldRanges.constEnd(); ++it) {
+        const int startBlock = it.key();
+        if (startBlock > cursorBlockNumber)
+            break;
+
+        const int endBlock = it.value();
+        if (cursorBlockNumber < startBlock || cursorBlockNumber > endBlock)
+            continue;
+
+        int openColumn = -1;
+        int closeColumn = -1;
+        if (!resolveBraceColumnsForFold(doc, startBlock, endBlock, &openColumn, &closeColumn))
+            continue;
+
+        containingFolds.append({startBlock, endBlock, openColumn, closeColumn, 0});
+    }
+
+    if (containingFolds.isEmpty())
+        return {};
+
+    ActiveBraceFold activeFold;
+    int activeSpan = -1;
+    for (const ActiveBraceFold& fold : std::as_const(containingFolds)) {
+        const int span = fold.endBlock - fold.startBlock;
+        if (activeSpan < 0 || span < activeSpan) {
+            activeSpan = span;
+            activeFold = fold;
+        }
+    }
+
+    int depth = 0;
+    for (const ActiveBraceFold& fold : std::as_const(containingFolds)) {
+        if (fold.startBlock <= activeFold.startBlock && fold.endBlock >= activeFold.endBlock)
+            ++depth;
+    }
+    activeFold.depth = qMax(0, depth - 1);
+    return activeFold;
+}
+
+static bool sameBracketGuideState(const BracketGuideState& a, const BracketGuideState& b)
+{
+    return a.startBlock == b.startBlock
+           && a.endBlock == b.endBlock
+           && a.openColumn == b.openColumn
+           && a.closeColumn == b.closeColumn
+           && a.depth == b.depth
+           && a.prefix == b.prefix;
+}
+
+static BracketGuideState buildBracketGuideState(const QTextDocument* doc,
+                                                const QMap<int, int>& foldRanges,
+                                                int cursorBlockNumber)
+{
+    BracketGuideState state;
+    const ActiveBraceFold activeFold = findActiveBraceFold(doc, foldRanges, cursorBlockNumber);
+    if (!activeFold.isValid())
+        return state;
+
+    state.startBlock = activeFold.startBlock;
+    state.endBlock = activeFold.endBlock;
+    state.openColumn = activeFold.openColumn;
+    state.closeColumn = activeFold.closeColumn;
+    state.depth = activeFold.depth;
+
+    if (!findFoldGuidePrefix(doc, activeFold.startBlock + 1, activeFold.endBlock - 1, &state.prefix)) {
+        const QTextBlock closeBlock = doc ? doc->findBlockByNumber(activeFold.endBlock) : QTextBlock();
+        if (closeBlock.isValid()) {
+            const int safeCloseColumn = qBound(0, activeFold.closeColumn, closeBlock.text().size());
+            state.prefix = closeBlock.text().left(safeCloseColumn);
+        }
+    }
+
+    return state;
+}
+
 } // namespace
 
 // ── Format map ───────────────────────────────────────────────────────────────
@@ -309,7 +565,27 @@ static FormatMap generateFormatMap(const QEditorTheme& theme) {
     return fmap;
 }
 
-static void applyEditorStyle(QPlainTextEdit* editor, int lineHeightPx = 26) {
+static constexpr int kMinEditorPointSize = 8;
+static constexpr int kMaxEditorPointSize = 40;
+
+static int clampEditorPointSize(int pointSize)
+{
+    return qBound(kMinEditorPointSize, pointSize, kMaxEditorPointSize);
+}
+
+static int editorPointSize(const QFont& font)
+{
+    const int pointSize = QFontInfo(font).pointSize();
+    return pointSize > 0 ? pointSize : 14;
+}
+
+static int editorLineHeight(const QFont& font)
+{
+    return qMax(18, qRound(QFontMetricsF(font).lineSpacing() * 1.2));
+}
+
+static void applyEditorStyle(QPlainTextEdit* editor) {
+    const int lineHeightPx = editorLineHeight(editor->font());
     QTextBlockFormat fmt;
     fmt.setLineHeight(lineHeightPx, QTextBlockFormat::FixedHeight);
     QTextCursor cursor(editor->document());
@@ -548,6 +824,183 @@ void InnerEditor::paintEvent(QPaintEvent* e) {
     QPainter painter(viewport());
     painter.setFont(font());
     QFontMetrics fm(font());
+
+    if (d_ptr->m_bracketPairGuidesEnabled
+        && !d_ptr->m_largeDocumentMode
+        && d_ptr->m_foldManager) {
+        struct VisibleBlockSpan {
+            int blockNumber = -1;
+            qreal top = 0;
+            qreal bottom = 0;
+        };
+
+        QVector<VisibleBlockSpan> visibleBlocks;
+        QTextBlock block = firstVisibleBlock();
+        int blockNumber = block.blockNumber();
+        qreal top = blockBoundingGeometry(block).translated(contentOffset()).top();
+        qreal bottom = top + blockBoundingRect(block).height();
+
+        while (block.isValid() && top <= e->rect().bottom()) {
+            if (block.isVisible() && bottom >= e->rect().top())
+                visibleBlocks.append({blockNumber, top, bottom});
+
+            block = block.next();
+            top = bottom;
+            bottom = top + blockBoundingRect(block).height();
+            ++blockNumber;
+        }
+
+        if (!visibleBlocks.isEmpty()) {
+            auto lineCenterY = [](const VisibleBlockSpan& span) {
+                // return (span.top + span.bottom) * 0.5;
+                return span.bottom;
+            };
+
+            auto findVisibleIndex = [&visibleBlocks](int blockNumber) {
+                for (int i = 0; i < visibleBlocks.size(); ++i) {
+                    if (visibleBlocks.at(i).blockNumber == blockNumber)
+                        return i;
+                }
+                return -1;
+            };
+
+            const int contentX = static_cast<int>(contentOffset().x());
+            const qreal cellCenterOffset = qMax<qreal>(1.0, fm.horizontalAdvance(QLatin1Char(' ')) * 0.5);
+            const qreal verticalInset = 3.0;
+            const int firstVisibleBlock = visibleBlocks.first().blockNumber;
+            const int lastVisibleBlock = visibleBlocks.last().blockNumber;
+            const BracketGuideState& activeFold = d_ptr->m_activeBracketGuide;
+            const bool activeFoldVisible =
+                activeFold.isValid()
+                && activeFold.endBlock >= firstVisibleBlock
+                && activeFold.startBlock <= lastVisibleBlock
+                && !d_ptr->m_foldManager->isFolded(activeFold.startBlock);
+            if (activeFoldVisible) {
+                const QTextBlock openBlock = document()->findBlockByNumber(activeFold.startBlock);
+                const QTextBlock closeBlock = document()->findBlockByNumber(activeFold.endBlock);
+
+                if (openBlock.isValid() && closeBlock.isValid()) {
+                    const int headerVisibleIndex = findVisibleIndex(activeFold.startBlock);
+                    const int closeVisibleIndex = findVisibleIndex(activeFold.endBlock);
+
+                    int firstVisibleInnerIndex = -1;
+                    int lastVisibleBeforeCloseIndex = -1;
+                    for (int i = 0; i < visibleBlocks.size(); ++i) {
+                        const int visibleBlockNumber = visibleBlocks.at(i).blockNumber;
+                        if (visibleBlockNumber > activeFold.startBlock
+                            && visibleBlockNumber < activeFold.endBlock) {
+                            if (firstVisibleInnerIndex < 0)
+                                firstVisibleInnerIndex = i;
+                            lastVisibleBeforeCloseIndex = i;
+                        }
+                    }
+
+                    const qreal openX = characterCenterPixelX(
+                        openBlock.text(), activeFold.openColumn, fm, d_ptr->m_tabWidth, contentX);
+                    const qreal closeX = characterCenterPixelX(
+                        closeBlock.text(), activeFold.closeColumn, fm, d_ptr->m_tabWidth, contentX);
+                    const qreal rawGuideX = contentX
+                                            + textPrefixPixelWidth(
+                                                  activeFold.prefix, fm, d_ptr->m_tabWidth)
+                                            + cellCenterOffset;
+                    const qreal guideX = qMin(qMin(openX, rawGuideX), closeX);
+
+                    const bool drawHeaderSegment =
+                        headerVisibleIndex >= 0 && visiblyDifferent(openX, guideX);
+                    const bool drawCloseSegment =
+                        closeVisibleIndex >= 0 && visiblyDifferent(closeX, guideX);
+
+                    qreal startY = 0.0;
+                    bool hasStartY = false;
+                    if (headerVisibleIndex >= 0) {
+                        startY = lineCenterY(visibleBlocks.at(headerVisibleIndex));
+                        hasStartY = true;
+                    } else if (firstVisibleInnerIndex >= 0) {
+                        startY = visibleBlocks.at(firstVisibleInnerIndex).top + verticalInset;
+                        hasStartY = true;
+                    } else if (headerVisibleIndex < 0 && drawCloseSegment) {
+                        startY = visibleBlocks.at(closeVisibleIndex).top + verticalInset;
+                        hasStartY = true;
+                    }
+
+                    qreal endY = -1.0;
+                    bool hasEndY = false;
+                    if (drawCloseSegment) {
+                        endY = lineCenterY(visibleBlocks.at(closeVisibleIndex));
+                        hasEndY = true;
+                    } else if (closeVisibleIndex >= 0) {
+                        endY = visibleBlocks.at(closeVisibleIndex).top - verticalInset;
+                        hasEndY = true;
+                    } else if (lastVisibleBeforeCloseIndex >= 0) {
+                        endY = visibleBlocks.at(lastVisibleBeforeCloseIndex).bottom - verticalInset;
+                        hasEndY = true;
+                    } else if (drawHeaderSegment) {
+                        endY = visibleBlocks.at(headerVisibleIndex).bottom - verticalInset;
+                        hasEndY = true;
+                    }
+
+                    painter.save();
+                    painter.setRenderHint(QPainter::Antialiasing, true);
+                    painter.setPen(QPen(bracketPairGuideColor(d_ptr->m_theme, activeFold.depth, true),
+                                        2.0,
+                                        Qt::SolidLine,
+                                        Qt::SquareCap,
+                                        Qt::MiterJoin));
+
+                    QPainterPath guidePath;
+                    bool hasPath = false;
+                    qreal currentX = 0.0;
+                    qreal currentY = 0.0;
+
+                    auto moveTo = [&guidePath, &hasPath, &currentX, &currentY](qreal x, qreal y) {
+                        guidePath.moveTo(x, y);
+                        hasPath = true;
+                        currentX = x;
+                        currentY = y;
+                    };
+
+                    auto lineTo = [&guidePath, &hasPath, &currentX, &currentY](qreal x, qreal y) {
+                        if (!hasPath) {
+                            guidePath.moveTo(x, y);
+                            hasPath = true;
+                        } else if (visiblyDifferent(currentX, x) || visiblyDifferent(currentY, y)) {
+                            guidePath.lineTo(x, y);
+                        }
+                        currentX = x;
+                        currentY = y;
+                    };
+
+                    if (drawHeaderSegment) {
+                        const qreal headerY = lineCenterY(visibleBlocks.at(headerVisibleIndex));
+                        moveTo(openX, headerY);
+                        lineTo(guideX, headerY);
+                    } else if (hasStartY) {
+                        moveTo(guideX, startY);
+                    }
+
+                    if (hasStartY && hasEndY && endY > startY) {
+                        if (!hasPath)
+                            moveTo(guideX, startY);
+                        lineTo(guideX, endY);
+                    }
+
+                    if (drawCloseSegment) {
+                        const qreal closeY = lineCenterY(visibleBlocks.at(closeVisibleIndex));
+                        if (!hasPath)
+                            moveTo(guideX, closeY);
+                        else
+                            lineTo(guideX, closeY);
+                        lineTo(closeX, closeY);
+                    }
+
+                    if (hasPath)
+                        painter.drawPath(guidePath);
+
+                    painter.restore();
+                }
+            }
+        }
+    }
 
     if (d_ptr->m_foldingEnabled && d_ptr->m_foldManager) {
         const QMap<int, int>& foldRanges = d_ptr->m_foldManager->foldRanges();
@@ -831,6 +1284,40 @@ void CodeEditorPrivate::setupActions()
             m_searchBar->openFindReplace();
     });
     q_ptr->addAction(showReplaceAction);
+
+    QAction* zoomInAction = new QAction(q_ptr);
+    zoomInAction->setShortcuts(QList<QKeySequence>{
+        QKeySequence(Qt::CTRL | Qt::Key_Plus),
+        QKeySequence(Qt::CTRL | Qt::Key_Equal)
+    });
+    connect(zoomInAction, &QAction::triggered, this, [this]() {
+        adjustZoom(1);
+    });
+    q_ptr->addAction(zoomInAction);
+
+    QAction* zoomOutAction = new QAction(q_ptr);
+    zoomOutAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Minus));
+    connect(zoomOutAction, &QAction::triggered, this, [this]() {
+        adjustZoom(-1);
+    });
+    q_ptr->addAction(zoomOutAction);
+}
+
+void CodeEditorPrivate::adjustZoom(int delta)
+{
+    if (delta == 0)
+        return;
+
+    QFont font = m_editor->font();
+    const int currentPointSize = clampEditorPointSize(editorPointSize(font));
+    const int nextPointSize = clampEditorPointSize(currentPointSize + delta);
+    if (nextPointSize == currentPointSize)
+        return;
+
+    m_zoomPointSize = nextPointSize;
+    m_theme.fontFamily = font.family();
+    m_theme.fontSize = nextPointSize;
+    q_ptr->setTheme(m_theme);
 }
 
 // ── "parsed" fan-out slot ─────────────────────────────────────────────────────
@@ -843,12 +1330,35 @@ void CodeEditorPrivate::onTreeParsed(void* treePtr)
     if (m_largeDocumentMode)
         return;
 
-    if (m_foldingEnabled)
+    if (m_foldingEnabled || m_bracketPairGuidesEnabled)
         m_foldManager->updateFoldRanges(treePtr, m_editor->document());
+
+    updateActiveBracketGuide();
 
     m_lineHighlighter->updateFromTree(treePtr, m_editor->document());
 
     m_syntaxChecker->analyze(treePtr);
+}
+
+void CodeEditorPrivate::updateActiveBracketGuide(bool forceRepaint)
+{
+    BracketGuideState nextState;
+    if (m_bracketPairGuidesEnabled
+        && !m_largeDocumentMode
+        && m_editor
+        && m_foldManager) {
+        nextState = buildBracketGuideState(
+            m_editor->document(),
+            m_foldManager->foldRanges(),
+            m_editor->textCursor().blockNumber());
+    }
+
+    const bool changed = !sameBracketGuideState(m_activeBracketGuide, nextState);
+    if (changed)
+        m_activeBracketGuide = nextState;
+
+    if ((forceRepaint || changed) && m_editor)
+        m_editor->viewport()->update();
 }
 
 void CodeEditorPrivate::syncMiniMapVisibility()
@@ -1161,7 +1671,7 @@ void CodeEditorPrivate::enforceFixedLineHeight(int from, int charsAdded)
     QTextBlock b   = m_editor->document()->findBlock(from);
     QTextBlock end = m_editor->document()->findBlock(from + charsAdded);
     QTextBlockFormat fmt;
-    fmt.setLineHeight(26, QTextBlockFormat::FixedHeight);
+    fmt.setLineHeight(editorLineHeight(m_editor->font()), QTextBlockFormat::FixedHeight);
     QTextCursor cur(m_editor->document());
     cur.beginEditBlock();
     while (b.isValid()) {
@@ -1997,6 +2507,7 @@ void CodeEditorPrivate::onCursorPositionChanged() {
 
     updateBracketMatch();
     updateCurrentLineHighlight();
+    updateActiveBracketGuide(true);
     QTextCursor cur = m_editor->textCursor();
     int blockNum = cur.blockNumber();
     m_gutter->setCurrentLine(blockNum + 1);
@@ -2187,7 +2698,11 @@ bool CodeEditor::saveFile(const QString& filePath) {
 void CodeEditor::setTheme(const QEditorTheme& theme) {
     Q_D(CodeEditor);
     d->m_theme = theme;
-    QFont editorFont(theme.fontFamily, theme.fontSize);
+    if (d->m_zoomPointSize > 0)
+        d->m_theme.fontSize = d->m_zoomPointSize;
+    d->m_theme.fontSize = clampEditorPointSize(d->m_theme.fontSize);
+    QFont editorFont(d->m_theme.fontFamily, d->m_theme.fontSize);
+    editorFont.setPointSize(d->m_theme.fontSize);
     editorFont.setFixedPitch(true);
     editorFont.setStyleHint(QFont::Monospace);
     editorFont.setHintingPreference(QFont::PreferFullHinting);
@@ -2200,7 +2715,7 @@ void CodeEditor::setTheme(const QEditorTheme& theme) {
     pal.setColor(QPalette::Highlight,        theme.selectionBackground);
     pal.setColor(QPalette::HighlightedText,  theme.selectionForeground);
     d->m_editor->setPalette(pal);
-    d->m_gutter->setTheme(theme);
+    d->m_gutter->setTheme(d->m_theme);
     if (d->m_highlighter) {
         d->m_highlighter->set_format_map(generateFormatMap(theme));
         d->m_highlighter->set_rainbow_colors(theme.rainbowColors);
@@ -2217,15 +2732,23 @@ void CodeEditor::setTheme(const QEditorTheme& theme) {
     }
     d->updateLineNumberAreaWidth(0);
     d->updateCurrentLineHighlight();
-    if (d->m_completer)      d->m_completer->setPopupTheme(theme);
-    if (d->m_functionPopup)  d->m_functionPopup->setTheme(theme);
-    if (d->m_searchBar)      d->m_searchBar->setTheme(theme);
-    if (d->m_miniMap)        d->m_miniMap->setTheme(theme);
+    if (d->m_completer)      d->m_completer->setPopupTheme(d->m_theme);
+    if (d->m_functionPopup)  d->m_functionPopup->setTheme(d->m_theme);
+    if (d->m_searchBar)      d->m_searchBar->setTheme(d->m_theme);
+    if (d->m_miniMap)        d->m_miniMap->setTheme(d->m_theme);
 }
 
 void CodeEditor::setThemeFromFile(const QString& jsonPath) { setTheme(QEditorTheme::fromJsonFile(jsonPath)); }
 QEditorTheme CodeEditor::theme() const { return d_ptr->m_theme; }
-void CodeEditor::setEditorFont(const QFont& font) { d_ptr->m_editor->setFont(font); }
+void CodeEditor::setEditorFont(const QFont& font) {
+    d_ptr->m_editor->setFont(font);
+    d_ptr->m_zoomPointSize = clampEditorPointSize(editorPointSize(font));
+    d_ptr->m_theme.fontFamily = font.family();
+    d_ptr->m_theme.fontSize = d_ptr->m_zoomPointSize;
+    applyEditorStyle(d_ptr->m_editor);
+    d_ptr->updateLineNumberAreaWidth(0);
+    d_ptr->updateCurrentLineHighlight();
+}
 QFont CodeEditor::editorFont() const { return d_ptr->m_editor->font(); }
 
 void CodeEditor::setLineNumbersVisible(bool visible) {
@@ -2285,6 +2808,24 @@ void CodeEditor::setAutoCompleteEnabled(bool enabled) {
 
 void CodeEditor::setAutoIndentEnabled (bool e) { d_ptr->m_autoIndent  = e; }
 void CodeEditor::setAutoBracketEnabled(bool e) { d_ptr->m_autoBracket = e; }
+void CodeEditor::setBracketPairGuidesEnabled(bool enabled)
+{
+    if (d_ptr->m_bracketPairGuidesEnabled == enabled)
+        return;
+
+    d_ptr->m_bracketPairGuidesEnabled = enabled;
+    if (!enabled)
+        d_ptr->m_activeBracketGuide.clear();
+    if (enabled && !d_ptr->m_largeDocumentMode && !d_ptr->m_heavyFeaturesSuspended && d_ptr->m_highlighter)
+        d_ptr->m_highlighter->rehighlight();
+    d_ptr->updateActiveBracketGuide(true);
+}
+
+bool CodeEditor::bracketPairGuidesEnabled() const
+{
+    return d_ptr->m_bracketPairGuidesEnabled;
+}
+
 void CodeEditor::setWordWrap(bool enabled) {
     d_ptr->m_editor->setLineWrapMode(enabled ? QPlainTextEdit::WidgetWidth : QPlainTextEdit::NoWrap);
 }

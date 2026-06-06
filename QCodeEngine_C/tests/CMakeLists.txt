@@ -11,3 +11,4 @@ function(add_editor_test name)
 endfunction()
 
 add_editor_test(test_findreplace_crash)
+add_editor_test(test_bracket_guides_editing)

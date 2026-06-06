@@ -28,6 +28,7 @@ int main(int argc, char* argv[]) {
     // editor->setMiniMapVisible(true);
     editor->setFoldingEnabled(true);
     editor->setAutoCompleteEnabled(true);
+    editor->setBracketPairGuidesEnabled(true);
     editor->setTabWidth(4);
     editor->setInsertSpacesOnTab(true);
 

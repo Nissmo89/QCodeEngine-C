@@ -33,6 +33,33 @@ struct MultiCursorState {
     int position = 0;
 };
 
+struct BracketGuideState {
+    int startBlock = -1;
+    int endBlock = -1;
+    int openColumn = -1;
+    int closeColumn = -1;
+    int depth = 0;
+    QString prefix;
+
+    bool isValid() const
+    {
+        return startBlock >= 0
+               && endBlock > startBlock
+               && openColumn >= 0
+               && closeColumn >= 0;
+    }
+
+    void clear()
+    {
+        startBlock = -1;
+        endBlock = -1;
+        openColumn = -1;
+        closeColumn = -1;
+        depth = 0;
+        prefix.clear();
+    }
+};
+
 class InnerEditor : public QPlainTextEdit {
     Q_OBJECT
 public:
@@ -89,6 +116,7 @@ public:
     bool m_autoBracket     = true;
     bool m_autoIndent      = true;
     bool m_foldingEnabled  = false;
+    bool m_bracketPairGuidesEnabled = false;
     bool m_miniMapVisibleRequested = false;
     bool m_largeFileMode = false;
     bool m_largeDocumentMode = false;
@@ -116,6 +144,7 @@ public:
     QList<QTextEdit::ExtraSelection> m_searchSelections;
     QList<QTextEdit::ExtraSelection> m_lineHighlightSelections;
     QVector<MultiCursorState> m_multiCursors;
+    BracketGuideState m_activeBracketGuide;
     QMap<QString, CodeEditorPlugin*> m_plugins;
 
     // Future components
@@ -134,6 +163,7 @@ public:
     SyntaxErrorDetector *m_syntaxChecker;
     LargeFileState* m_largeFileState = nullptr;
     QThread* m_asyncLoadThread = nullptr;
+    int m_zoomPointSize = -1;
 
 
 
@@ -147,7 +177,9 @@ public:
     void setupEditorModules();
     void setupConnections();
     void setupActions();
+    void adjustZoom(int delta);
     void onTreeParsed(void* treePtr);
+    void updateActiveBracketGuide(bool forceRepaint = false);
     void syncMiniMapVisibility();
     void enforceFixedLineHeight(int from, int charsAdded);
     void onGutterMarkerToggled(int line, MarkerType type);
