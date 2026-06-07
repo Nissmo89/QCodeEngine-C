@@ -37,6 +37,8 @@ add_library(QCodeEngine_C
     src/TreeSitterHighlighter.h
     src/AutoCompleter.cpp
     src/AutoCompleter.h
+    src/LiveIndentController.cpp
+    src/LiveIndentController.h
     src/MiniMapWidget.cpp
 #    src/QSearchBar.cpp
     src/treesitterhelper.h

@@ -51,6 +51,8 @@ public:
     void        setShowWhitespace(bool visible);
     void        setTabWidth(int spaces);
     void        setInsertSpacesOnTab(bool spaces);
+    void        setIndentStylePreset(IndentStylePreset preset);
+    IndentStylePreset indentStylePreset() const;
 
     // --- Gutter icons (diagnostics, tips) ---
     void        addGutterIcon(int line, GutterIconType type, const QString& tooltip);

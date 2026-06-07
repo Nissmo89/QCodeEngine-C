@@ -64,6 +64,8 @@ class TreeSitterHighlighter: public QObject {
     /// Return the highlighters format map.
     /// @return The highlighters frmat map.
     const FormatMap get_format_map();
+    const TSTree* syntaxTree() const { return tree; }
+    QString sourceText() const { return m_sourceCache; }
     /// Set the colors used for rainbow brackets.
     void set_rainbow_colors(const QList<QColor>& colors);
     void setPerformanceMode(bool enabled);

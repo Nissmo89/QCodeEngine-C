@@ -1,8 +1,59 @@
 #include "CodeEditor/EditorTheme.h"
+#include <QCoreApplication>
+#include <QDir>
+#include <QFontDatabase>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QFile>
 
+namespace {
+
+QString defaultEditorFontFamily()
+{
+    static QString resolvedFamily;
+    static bool resolved = false;
+    if (resolved)
+        return resolvedFamily;
+
+    resolved = true;
+
+    QStringList candidatePaths;
+    auto collectCandidates = [&candidatePaths](const QString& startPath) {
+        if (startPath.isEmpty())
+            return;
+
+        QDir dir(startPath);
+        for (int depth = 0; depth < 5; ++depth) {
+            candidatePaths.append(dir.filePath(QStringLiteral("ZedMonoNerdFont-Regular.ttf")));
+            if (!dir.cdUp())
+                break;
+        }
+    };
+
+    if (QCoreApplication::instance())
+        collectCandidates(QCoreApplication::applicationDirPath());
+    collectCandidates(QDir::currentPath());
+
+    for (const QString& candidate : candidatePaths) {
+        if (!QFile::exists(candidate))
+            continue;
+
+        const int fontId = QFontDatabase::addApplicationFont(candidate);
+        if (fontId < 0)
+            continue;
+
+        const QStringList families = QFontDatabase::applicationFontFamilies(fontId);
+        if (!families.isEmpty()) {
+            resolvedFamily = families.first();
+            return resolvedFamily;
+        }
+    }
+
+    resolvedFamily = QStringLiteral("JetBrains Mono");
+    return resolvedFamily;
+}
+
+} // namespace
 
 QEditorTheme QEditorTheme::own_theme() {
     QEditorTheme t;
@@ -71,7 +122,7 @@ QEditorTheme QEditorTheme::own_theme() {
     t.diagnosticInfo    = QColor("#2473B6");
     t.diagnosticHint    = QColor("#6851A2");
 
-    t.fontFamily = "JetBrains Mono";
+    t.fontFamily = defaultEditorFontFamily();
     t.fontSize   = 14;
 
     return t;
@@ -144,7 +195,7 @@ QEditorTheme QEditorTheme::cursorDarkTheme() {
     t.diagnosticInfo    = QColor("#82D2CE");
     t.diagnosticHint    = QColor("#3FA266");
 
-    t.fontFamily = "JetBrains Mono";
+    t.fontFamily = defaultEditorFontFamily();
     t.fontSize   = 14;
 
     return t;
@@ -207,7 +258,7 @@ QEditorTheme QEditorTheme::draculaTheme() {
         QColor("#F1FA8C")  // Yellow
     };
 
-    t.fontFamily = "JetBrains Mono";
+    t.fontFamily = defaultEditorFontFamily();
     t.fontSize   = 14;
 
     return t;
@@ -272,7 +323,7 @@ QEditorTheme QEditorTheme::monokaiTheme() {
         QColor("#AE81FF")  // Purple
     };
 
-    t.fontFamily = "JetBrains Mono";
+    t.fontFamily = defaultEditorFontFamily();
     t.fontSize   = 14;
 
     return t;
@@ -335,7 +386,7 @@ QEditorTheme QEditorTheme::oneDarkTheme() {
         QColor("#c678dd")  // Purple
     };
 
-    t.fontFamily = "JetBrains Mono";
+    t.fontFamily = defaultEditorFontFamily();
     t.fontSize   = 14;
 
     return t;
@@ -400,7 +451,7 @@ QEditorTheme QEditorTheme::solarizedDarkTheme() {
         QColor("#268bd2")  // Blue
     };
 
-    t.fontFamily = "JetBrains Mono";
+    t.fontFamily = defaultEditorFontFamily();
     t.fontSize   = 14;
 
     return t;
@@ -465,7 +516,7 @@ QEditorTheme QEditorTheme::githubLightTheme() {
         QColor("#6f42c1")  // Purple
     };
 
-    t.fontFamily = "JetBrains Mono";
+    t.fontFamily = defaultEditorFontFamily();
     t.fontSize   = 14;
 
     return t;

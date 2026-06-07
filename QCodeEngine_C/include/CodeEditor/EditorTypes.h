@@ -17,3 +17,8 @@ struct GutterIconInfo {
     QString        tooltip;
     std::function<void()> clickHandler;
 };
+
+enum class IndentStylePreset {
+    KR,
+    Allman,
+};

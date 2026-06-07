@@ -19,6 +19,7 @@
 class QKeyEvent;
 class QMouseEvent;
 class QEvent;
+class LiveIndentController;
 
 // Forward declarations for future stages
 // class QSyntaxHighlighter_TS;
@@ -88,6 +89,7 @@ class CodeEditorPrivate : public QObject {
     Q_OBJECT
 public:
     explicit CodeEditorPrivate(CodeEditor* q, QWidget* parent = nullptr);
+    ~CodeEditorPrivate() override;
 
 
 
@@ -115,6 +117,7 @@ public:
     int  m_tabWidth        = 4;
     bool m_autoBracket     = true;
     bool m_autoIndent      = true;
+    IndentStylePreset m_indentStylePreset = IndentStylePreset::KR;
     bool m_foldingEnabled  = false;
     bool m_bracketPairGuidesEnabled = false;
     bool m_miniMapVisibleRequested = false;
@@ -154,6 +157,7 @@ public:
     MiniMapWidget* m_miniMap = nullptr;
     FindReplaceBar* m_searchBar = nullptr;
     GutterWidget *m_gutter = nullptr;
+    LiveIndentController* m_liveIndentController = nullptr;
 
     // ✅ NEW members
     FloatingListPopup *m_functionPopup = nullptr;

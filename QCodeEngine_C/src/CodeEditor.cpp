@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <utility>
 #include "TreeSitterQuery_C.h"
+#include "LiveIndentController.h"
 #include "syntaxerrordetector.h"
 
 extern "C" const TSLanguage *tree_sitter_c(void);
@@ -1101,6 +1102,12 @@ CodeEditorPrivate::CodeEditorPrivate(CodeEditor* q, QWidget* parent)
     });
 }
 
+CodeEditorPrivate::~CodeEditorPrivate()
+{
+    delete m_liveIndentController;
+    m_liveIndentController = nullptr;
+}
+
 // ── Layout ────────────────────────────────────────────────────────────────────
 void CodeEditorPrivate::setupLayout()
 {
@@ -1158,6 +1165,13 @@ void CodeEditorPrivate::setupEditorModules()
     // AutoCompleter
     m_completer = new AutoCompleter(this);
     m_completer->setEditor(m_editor);
+
+    m_liveIndentController = new LiveIndentController(m_editor, m_highlighter);
+    m_liveIndentController->setEnabled(m_autoIndent);
+    m_liveIndentController->setTabWidth(m_tabWidth);
+    m_liveIndentController->setInsertSpaces(m_insertSpaces);
+    m_liveIndentController->setAutoBracketEnabled(m_autoBracket);
+    m_liveIndentController->setStylePreset(m_indentStylePreset);
 
     m_largeDocHighlightTimer = new QTimer(this);
     m_largeDocHighlightTimer->setSingleShot(true);
@@ -1630,9 +1644,23 @@ bool CodeEditorPrivate::handleMultiCursorEdit(QKeyEvent* event)
                > qMax(b.cursor.selectionStart(), b.cursor.position());
     });
 
+    const bool allowSmartIndentMultiCursor =
+        m_liveIndentController
+        && (op == EditOp::InsertNewline
+            || op == EditOp::Backspace
+            || (op == EditOp::InsertText
+                && payload.size() == 1
+                && (payload.at(0) == QLatin1Char('}')
+                    || payload.at(0) == QLatin1Char('{'))));
+
     QTextCursor transaction(m_editor->document());
     transaction.beginEditBlock();
     for (CursorEntry& e : entries) {
+        if (allowSmartIndentMultiCursor
+            && m_liveIndentController->handleKeyPress(event, e.cursor, false)) {
+            continue;
+        }
+
         switch (op) {
         case EditOp::InsertText:
             e.cursor.insertText(payload);
@@ -2386,20 +2414,7 @@ bool CodeEditorPrivate::handleKeyPress(QKeyEvent* event) {
     if (event->key() == Qt::Key_Slash && (event->modifiers() & Qt::ControlModifier)) {
         toggleLineComment(); return true;
     }
-    if (m_autoIndent && (event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter)) {
-        QTextCursor cursor = m_editor->textCursor();
-        QString currentLine = cursor.block().text();
-        int spaces = 0;
-        for (QChar ch : currentLine) {
-            if (ch == ' ') spaces++; else if (ch == '\t') spaces += m_tabWidth; else break;
-        }
-        bool openBrace = currentLine.trimmed().endsWith('{');
-        cursor.insertText("\n");
-        QString indent = m_insertSpaces
-                             ? QString(spaces + (openBrace ? m_tabWidth : 0), ' ')
-                             : QString(spaces / m_tabWidth + (openBrace ? 1 : 0), '\t');
-        cursor.insertText(indent);
-        m_editor->setTextCursor(cursor);
+    if (m_liveIndentController && m_liveIndentController->handleKeyPress(event)) {
         return true;
     }
     if (m_autoBracket) {
@@ -2806,8 +2821,19 @@ void CodeEditor::setAutoCompleteEnabled(bool enabled) {
     }
 }
 
-void CodeEditor::setAutoIndentEnabled (bool e) { d_ptr->m_autoIndent  = e; }
-void CodeEditor::setAutoBracketEnabled(bool e) { d_ptr->m_autoBracket = e; }
+void CodeEditor::setAutoIndentEnabled(bool e)
+{
+    d_ptr->m_autoIndent = e;
+    if (d_ptr->m_liveIndentController)
+        d_ptr->m_liveIndentController->setEnabled(e);
+}
+
+void CodeEditor::setAutoBracketEnabled(bool e)
+{
+    d_ptr->m_autoBracket = e;
+    if (d_ptr->m_liveIndentController)
+        d_ptr->m_liveIndentController->setAutoBracketEnabled(e);
+}
 void CodeEditor::setBracketPairGuidesEnabled(bool enabled)
 {
     if (d_ptr->m_bracketPairGuidesEnabled == enabled)
@@ -2838,10 +2864,30 @@ void CodeEditor::setShowWhitespace(bool visible) {
 }
 void CodeEditor::setTabWidth(int spaces) {
     d_ptr->m_tabWidth = spaces;
+    if (d_ptr->m_liveIndentController)
+        d_ptr->m_liveIndentController->setTabWidth(spaces);
     d_ptr->m_editor->setTabStopDistance(
         QFontMetricsF(d_ptr->m_editor->font()).horizontalAdvance(' ') * spaces);
 }
-void CodeEditor::setInsertSpacesOnTab(bool spaces) { d_ptr->m_insertSpaces = spaces; }
+
+void CodeEditor::setInsertSpacesOnTab(bool spaces)
+{
+    d_ptr->m_insertSpaces = spaces;
+    if (d_ptr->m_liveIndentController)
+        d_ptr->m_liveIndentController->setInsertSpaces(spaces);
+}
+
+void CodeEditor::setIndentStylePreset(IndentStylePreset preset)
+{
+    d_ptr->m_indentStylePreset = preset;
+    if (d_ptr->m_liveIndentController)
+        d_ptr->m_liveIndentController->setStylePreset(preset);
+}
+
+IndentStylePreset CodeEditor::indentStylePreset() const
+{
+    return d_ptr->m_indentStylePreset;
+}
 
 void CodeEditor::addGutterIcon(int line, GutterIconType type, const QString& tooltip) {
     d_ptr->m_icons[qMax(1, line)] = {type, tooltip, nullptr};
