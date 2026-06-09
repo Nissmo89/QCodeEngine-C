@@ -1,4 +1,5 @@
 #include "CodeEditor/MiniMapWidget.h"
+#include "EditorMetrics.h"
 
 #include <QPlainTextEdit>
 #include <QPainter>
@@ -14,6 +15,14 @@ namespace {
 static int clampEditorLine(int line, int totalLines)
 {
     return qBound(0, line, qMax(0, totalLines - 1));
+}
+
+static int effectiveEditorLineHeight(const QPlainTextEdit* editor)
+{
+    if (!editor)
+        return EditorMetrics::kFallbackLineHeight;
+
+    return EditorMetrics::effectiveLineHeight(editor->font());
 }
 
 } // namespace
@@ -100,7 +109,7 @@ void MiniMapWidget::paintEvent(QPaintEvent* event)
 
     const QTextCursor topCursor = m_editor->cursorForPosition(QPoint(0, 0));
     const int firstVisibleLine = qMax(0, topCursor.blockNumber());
-    const int lineHeight = qMax(1, m_editor->fontMetrics().height());
+    const int lineHeight = qMax(1, effectiveEditorLineHeight(m_editor));
     const int visibleLines = qMax(1, m_editor->viewport()->height() / lineHeight + 1);
 
     const int topY = contentRect.top()

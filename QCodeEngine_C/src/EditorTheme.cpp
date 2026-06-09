@@ -2,8 +2,10 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFontDatabase>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJsonParseError>
 #include <QFile>
 
 namespace {
@@ -51,6 +53,87 @@ QString defaultEditorFontFamily()
 
     resolvedFamily = QStringLiteral("JetBrains Mono");
     return resolvedFamily;
+}
+
+QString colorToJsonString(const QColor& color)
+{
+    if (!color.isValid())
+        return QString();
+
+    return color.alpha() == 255
+        ? color.name(QColor::HexRgb)
+        : color.name(QColor::HexArgb);
+}
+
+QColor colorFromJsonValue(const QJsonValue& value)
+{
+    if (!value.isString())
+        return QColor();
+
+    const QColor color(value.toString());
+    return color.isValid() ? color : QColor();
+}
+
+void readStringField(const QJsonObject& obj, const char* key, QString& target)
+{
+    const QJsonValue value = obj.value(QLatin1String(key));
+    if (value.isString())
+        target = value.toString();
+}
+
+void readIntField(const QJsonObject& obj, const char* key, int& target)
+{
+    const QJsonValue value = obj.value(QLatin1String(key));
+    if (value.isDouble())
+        target = value.toInt(target);
+}
+
+void readBoolField(const QJsonObject& obj, const char* key, bool& target)
+{
+    const QJsonValue value = obj.value(QLatin1String(key));
+    if (value.isBool())
+        target = value.toBool(target);
+}
+
+void readColorField(const QJsonObject& obj, const char* key, QColor& target)
+{
+    const QColor color = colorFromJsonValue(obj.value(QLatin1String(key)));
+    if (color.isValid())
+        target = color;
+}
+
+void readColorListField(const QJsonObject& obj, const char* key, QList<QColor>& target)
+{
+    const QJsonValue value = obj.value(QLatin1String(key));
+    if (!value.isArray())
+        return;
+
+    QList<QColor> colors;
+    const QJsonArray array = value.toArray();
+    colors.reserve(array.size());
+    for (const QJsonValue& item : array) {
+        const QColor color = colorFromJsonValue(item);
+        if (color.isValid())
+            colors.append(color);
+    }
+
+    target = colors;
+}
+
+void writeColorField(QJsonObject& obj, const char* key, const QColor& color)
+{
+    if (color.isValid())
+        obj[QLatin1String(key)] = colorToJsonString(color);
+}
+
+void writeColorListField(QJsonObject& obj, const char* key, const QList<QColor>& colors)
+{
+    QJsonArray array;
+    for (const QColor& color : colors) {
+        if (color.isValid())
+            array.append(colorToJsonString(color));
+    }
+    obj[QLatin1String(key)] = array;
 }
 
 } // namespace
@@ -123,7 +206,7 @@ QEditorTheme QEditorTheme::own_theme() {
     t.diagnosticHint    = QColor("#6851A2");
 
     t.fontFamily = defaultEditorFontFamily();
-    t.fontSize   = 14;
+    t.fontSize   = 13;
 
     return t;
 }
@@ -196,7 +279,7 @@ QEditorTheme QEditorTheme::cursorDarkTheme() {
     t.diagnosticHint    = QColor("#3FA266");
 
     t.fontFamily = defaultEditorFontFamily();
-    t.fontSize   = 14;
+    t.fontSize   = 13;
 
     return t;
 }
@@ -259,7 +342,7 @@ QEditorTheme QEditorTheme::draculaTheme() {
     };
 
     t.fontFamily = defaultEditorFontFamily();
-    t.fontSize   = 14;
+    t.fontSize   = 13;
 
     return t;
 }
@@ -324,7 +407,7 @@ QEditorTheme QEditorTheme::monokaiTheme() {
     };
 
     t.fontFamily = defaultEditorFontFamily();
-    t.fontSize   = 14;
+    t.fontSize   = 13;
 
     return t;
 }
@@ -387,7 +470,7 @@ QEditorTheme QEditorTheme::oneDarkTheme() {
     };
 
     t.fontFamily = defaultEditorFontFamily();
-    t.fontSize   = 14;
+    t.fontSize   = 13;
 
     return t;
 }
@@ -452,7 +535,7 @@ QEditorTheme QEditorTheme::solarizedDarkTheme() {
     };
 
     t.fontFamily = defaultEditorFontFamily();
-    t.fontSize   = 14;
+    t.fontSize   = 13;
 
     return t;
 }
@@ -517,7 +600,7 @@ QEditorTheme QEditorTheme::githubLightTheme() {
     };
 
     t.fontFamily = defaultEditorFontFamily();
-    t.fontSize   = 14;
+    t.fontSize   = 13;
 
     return t;
 }
@@ -525,21 +608,82 @@ QEditorTheme QEditorTheme::githubLightTheme() {
 QEditorTheme QEditorTheme::fromJsonFile(const QString& path) {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) return draculaTheme();
-    return fromJsonString(file.readAll());
+    return fromJsonString(QString::fromUtf8(file.readAll()));
 }
 
 QEditorTheme QEditorTheme::fromJsonString(const QString& jsonStr) {
-    QJsonDocument doc = QJsonDocument::fromJson(jsonStr.toUtf8());
-    QJsonObject obj = doc.object();
-    QEditorTheme t = draculaTheme(); // Base
-    
-    if (obj.contains("name")) t.name = obj["name"].toString();
-    if (obj.contains("background")) t.background = QColor(obj["background"].toString());
-    if (obj.contains("foreground")) t.foreground = QColor(obj["foreground"].toString());
-    if (obj.contains("accent")) t.accent = QColor(obj["accent"].toString());
-    if (obj.contains("tokenKeyword")) t.tokenKeyword = QColor(obj["tokenKeyword"].toString());
-    // (A complete implementation would parse all fields)
-    
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(jsonStr.toUtf8(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject())
+        return draculaTheme();
+
+    const QJsonObject obj = doc.object();
+    QEditorTheme t = draculaTheme();
+
+    readStringField(obj, "name", t.name);
+
+    readColorField(obj, "background", t.background);
+    readColorField(obj, "foreground", t.foreground);
+    readColorField(obj, "selectionBackground", t.selectionBackground);
+    readColorField(obj, "selectionForeground", t.selectionForeground);
+    readColorField(obj, "currentLineBackground", t.currentLineBackground);
+    readColorField(obj, "lineNumberForeground", t.lineNumberForeground);
+    readColorField(obj, "accent", t.accent);
+
+    readColorField(obj, "gutterBackground", t.gutterBackground);
+    readColorField(obj, "gutterForeground", t.gutterForeground);
+    readColorField(obj, "gutterBorderColor", t.gutterBorderColor);
+    readColorField(obj, "gutterActiveLineNumber", t.gutterActiveLineNumber);
+
+    readColorField(obj, "bracketMatchBackground", t.bracketMatchBackground);
+    readColorField(obj, "bracketMatchForeground", t.bracketMatchForeground);
+    readColorField(obj, "bracketMismatchBackground", t.bracketMismatchBackground);
+    readColorListField(obj, "rainbowColors", t.rainbowColors);
+
+    readColorField(obj, "tokenKeyword", t.tokenKeyword);
+    readColorField(obj, "tokenKeywordControl", t.tokenKeywordControl);
+    readColorField(obj, "tokenKeywordPreproc", t.tokenKeywordPreproc);
+    readColorField(obj, "tokenType", t.tokenType);
+    readColorField(obj, "tokenString", t.tokenString);
+    readColorField(obj, "tokenNumber", t.tokenNumber);
+    readColorField(obj, "tokenComment", t.tokenComment);
+    readColorField(obj, "tokenPreprocessor", t.tokenPreprocessor);
+    readColorField(obj, "tokenFunction", t.tokenFunction);
+    readColorField(obj, "tokenFunctionCall", t.tokenFunctionCall);
+    readColorField(obj, "tokenIdentifier", t.tokenIdentifier);
+    readColorField(obj, "tokenField", t.tokenField);
+    readColorField(obj, "tokenEscape", t.tokenEscape);
+    readColorField(obj, "tokenOperator", t.tokenOperator);
+    readColorField(obj, "tokenPunctuation", t.tokenPunctuation);
+    readColorField(obj, "tokenBoolean", t.tokenBoolean);
+    readColorField(obj, "tokenConstantBuiltin", t.tokenConstantBuiltin);
+    readColorField(obj, "tokenConstant", t.tokenConstant);
+    readColorField(obj, "tokenAttribute", t.tokenAttribute);
+    readColorField(obj, "tokenLabel", t.tokenLabel);
+
+    readBoolField(obj, "keywordBold", t.keywordBold);
+    readBoolField(obj, "commentItalic", t.commentItalic);
+    readBoolField(obj, "functionBold", t.functionBold);
+    readBoolField(obj, "typeBold", t.typeBold);
+
+    readColorField(obj, "searchHighlightBackground", t.searchHighlightBackground);
+    readColorField(obj, "searchHighlightForeground", t.searchHighlightForeground);
+    readColorField(obj, "searchCurrentMatchBackground", t.searchCurrentMatchBackground);
+
+    readColorField(obj, "minimapBackground", t.minimapBackground);
+    readColorField(obj, "minimapViewportColor", t.minimapViewportColor);
+
+    readColorField(obj, "indentGuideColor", t.indentGuideColor);
+    readBoolField(obj, "showIndentGuides", t.showIndentGuides);
+
+    readStringField(obj, "fontFamily", t.fontFamily);
+    readIntField(obj, "fontSize", t.fontSize);
+
+    readColorField(obj, "diagnosticError", t.diagnosticError);
+    readColorField(obj, "diagnosticWarning", t.diagnosticWarning);
+    readColorField(obj, "diagnosticInfo", t.diagnosticInfo);
+    readColorField(obj, "diagnosticHint", t.diagnosticHint);
+
     return t;
 }
 
@@ -553,9 +697,68 @@ void QEditorTheme::toJsonFile(const QString& path) const {
 QString QEditorTheme::toJsonString() const {
     QJsonObject obj;
     obj["name"] = name;
-    obj["background"] = background.name(QColor::HexArgb);
-    obj["foreground"] = foreground.name(QColor::HexArgb);
-    obj["accent"] = accent.isValid() ? accent.name(QColor::HexArgb) : QStringLiteral("#FF5AA9FF");
-    // (A complete implementation would output all fields)
-    return QJsonDocument(obj).toJson(QJsonDocument::Indented);
+
+    writeColorField(obj, "background", background);
+    writeColorField(obj, "foreground", foreground);
+    writeColorField(obj, "selectionBackground", selectionBackground);
+    writeColorField(obj, "selectionForeground", selectionForeground);
+    writeColorField(obj, "currentLineBackground", currentLineBackground);
+    writeColorField(obj, "lineNumberForeground", lineNumberForeground);
+    writeColorField(obj, "accent", accent);
+
+    writeColorField(obj, "gutterBackground", gutterBackground);
+    writeColorField(obj, "gutterForeground", gutterForeground);
+    writeColorField(obj, "gutterBorderColor", gutterBorderColor);
+    writeColorField(obj, "gutterActiveLineNumber", gutterActiveLineNumber);
+
+    writeColorField(obj, "bracketMatchBackground", bracketMatchBackground);
+    writeColorField(obj, "bracketMatchForeground", bracketMatchForeground);
+    writeColorField(obj, "bracketMismatchBackground", bracketMismatchBackground);
+    writeColorListField(obj, "rainbowColors", rainbowColors);
+
+    writeColorField(obj, "tokenKeyword", tokenKeyword);
+    writeColorField(obj, "tokenKeywordControl", tokenKeywordControl);
+    writeColorField(obj, "tokenKeywordPreproc", tokenKeywordPreproc);
+    writeColorField(obj, "tokenType", tokenType);
+    writeColorField(obj, "tokenString", tokenString);
+    writeColorField(obj, "tokenNumber", tokenNumber);
+    writeColorField(obj, "tokenComment", tokenComment);
+    writeColorField(obj, "tokenPreprocessor", tokenPreprocessor);
+    writeColorField(obj, "tokenFunction", tokenFunction);
+    writeColorField(obj, "tokenFunctionCall", tokenFunctionCall);
+    writeColorField(obj, "tokenIdentifier", tokenIdentifier);
+    writeColorField(obj, "tokenField", tokenField);
+    writeColorField(obj, "tokenEscape", tokenEscape);
+    writeColorField(obj, "tokenOperator", tokenOperator);
+    writeColorField(obj, "tokenPunctuation", tokenPunctuation);
+    writeColorField(obj, "tokenBoolean", tokenBoolean);
+    writeColorField(obj, "tokenConstantBuiltin", tokenConstantBuiltin);
+    writeColorField(obj, "tokenConstant", tokenConstant);
+    writeColorField(obj, "tokenAttribute", tokenAttribute);
+    writeColorField(obj, "tokenLabel", tokenLabel);
+
+    obj["keywordBold"] = keywordBold;
+    obj["commentItalic"] = commentItalic;
+    obj["functionBold"] = functionBold;
+    obj["typeBold"] = typeBold;
+
+    writeColorField(obj, "searchHighlightBackground", searchHighlightBackground);
+    writeColorField(obj, "searchHighlightForeground", searchHighlightForeground);
+    writeColorField(obj, "searchCurrentMatchBackground", searchCurrentMatchBackground);
+
+    writeColorField(obj, "minimapBackground", minimapBackground);
+    writeColorField(obj, "minimapViewportColor", minimapViewportColor);
+
+    writeColorField(obj, "indentGuideColor", indentGuideColor);
+    obj["showIndentGuides"] = showIndentGuides;
+
+    obj["fontFamily"] = fontFamily;
+    obj["fontSize"] = fontSize;
+
+    writeColorField(obj, "diagnosticError", diagnosticError);
+    writeColorField(obj, "diagnosticWarning", diagnosticWarning);
+    writeColorField(obj, "diagnosticInfo", diagnosticInfo);
+    writeColorField(obj, "diagnosticHint", diagnosticHint);
+
+    return QString::fromUtf8(QJsonDocument(obj).toJson(QJsonDocument::Indented));
 }

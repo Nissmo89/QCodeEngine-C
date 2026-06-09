@@ -5,6 +5,7 @@
 #include <QHash>
 #include <QStringList>
 #include <QListWidget>
+#include <QPointer>
 
 class QPlainTextEdit;
 class QKeyEvent;
@@ -75,7 +76,8 @@ public:
     bool handleKeyPress(QKeyEvent* e);
 
     // Called by InnerEditor::keyPressEvent — after the base class processes it.
-    void updatePopup();
+    void updatePopup(bool force = false);
+    void dismissPopup();
 
     void refreshModel();
 
@@ -89,8 +91,8 @@ private:
     void    applyThemeToPopup();
     void    rebuildEntries();         // rebuild m_entries from all sources
 
-    QPlainTextEdit*  m_editor = nullptr;
-    CompletionPopup* m_popup  = nullptr;
+    QPointer<QPlainTextEdit>  m_editor;
+    QPointer<CompletionPopup> m_popup;
 
     // Word lists
     QStringList          m_baseKeywords;

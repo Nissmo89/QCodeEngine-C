@@ -1,7 +1,10 @@
 #include "CodeEditor/CodeEditor.h"
 #include "CodeEditor/diagnosticmanager.h"
 #include "CodeEditor_p.h"
+#include "EditorMetrics.h"
 #include <QHBoxLayout>
+#include <QCoreApplication>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QFontInfo>
@@ -9,6 +12,7 @@
 #include <QTextBlock>
 #include <QPainter>
 #include <QPainterPath>
+#include <QFocusEvent>
 #include <QMouseEvent>
 #include <QVector>
 #include <QSet>
@@ -56,6 +60,99 @@ struct LargeFileState {
 };
 
 namespace {
+
+struct ThemeCycleEntry {
+    QEditorTheme theme;
+};
+
+static int editorLineHeight(const QFont& font)
+{
+    return EditorMetrics::effectiveLineHeight(font);
+}
+
+QStringList discoverThemeDirectories()
+{
+    QStringList directories;
+
+    auto collectFrom = [&directories](const QString& startPath) {
+        if (startPath.isEmpty())
+            return;
+
+        QDir dir(startPath);
+        for (int depth = 0; depth < 6; ++depth) {
+            const QString repoThemes = dir.filePath(QStringLiteral("QCodeEngine_C/themes"));
+            if (QDir(repoThemes).exists())
+                directories.append(QDir(repoThemes).absolutePath());
+
+            const QString localThemes = dir.filePath(QStringLiteral("themes"));
+            if (QDir(localThemes).exists())
+                directories.append(QDir(localThemes).absolutePath());
+
+            const QString installedThemes = dir.filePath(QStringLiteral("../share/QCodeEngine_C/themes"));
+            if (QDir(installedThemes).exists())
+                directories.append(QDir(installedThemes).absolutePath());
+
+            if (!dir.cdUp())
+                break;
+        }
+    };
+
+    if (QCoreApplication::instance())
+        collectFrom(QCoreApplication::applicationDirPath());
+    collectFrom(QDir::currentPath());
+
+    directories.removeDuplicates();
+    return directories;
+}
+
+QVector<ThemeCycleEntry> buildThemeCycleEntries()
+{
+    QVector<ThemeCycleEntry> entries;
+
+    using ThemeFactory = QEditorTheme (*)();
+    static const ThemeFactory builtinThemes[] = {
+        QEditorTheme::own_theme,
+        QEditorTheme::oneDarkTheme,
+        QEditorTheme::draculaTheme,
+        QEditorTheme::monokaiTheme,
+        QEditorTheme::solarizedDarkTheme,
+        QEditorTheme::githubLightTheme,
+        QEditorTheme::cursorDarkTheme
+    };
+
+    for (ThemeFactory factory : builtinThemes) {
+        QEditorTheme theme = factory();
+        entries.push_back({theme});
+    }
+
+    QSet<QString> seenPaths;
+    const QStringList themeDirectories = discoverThemeDirectories();
+    for (const QString& themeDirPath : themeDirectories) {
+        const QDir themeDir(themeDirPath);
+        const QFileInfoList files = themeDir.entryInfoList(
+            QStringList() << QStringLiteral("*.json"),
+            QDir::Files | QDir::Readable,
+            QDir::Name | QDir::IgnoreCase);
+        for (const QFileInfo& fileInfo : files) {
+            const QString path = fileInfo.absoluteFilePath();
+            if (seenPaths.contains(path))
+                continue;
+
+            seenPaths.insert(path);
+            QEditorTheme theme = QEditorTheme::fromJsonFile(path);
+            if (theme.name.isEmpty())
+                theme.name = fileInfo.completeBaseName();
+            entries.push_back({theme});
+        }
+    }
+
+    return entries;
+}
+
+bool sameThemeDefinition(const QEditorTheme& lhs, const QEditorTheme& rhs)
+{
+    return lhs.toJsonString() == rhs.toJsonString();
+}
 
 struct CLexer {
     enum Phase { Normal, LineComment, BlockComment, String, Char } phase = Normal;
@@ -214,7 +311,7 @@ static int largeDocumentHighlightRadius(const QPlainTextEdit* editor)
     if (!editor)
         return 220;
 
-    const int lineHeight = qMax(1, editor->fontMetrics().height());
+    const int lineHeight = qMax(1, editorLineHeight(editor->font()));
     const int visibleLines = qMax(1, editor->viewport()->height() / lineHeight);
     const int radius = visibleLines * 3;
     return qBound(160, radius, 420);
@@ -568,6 +665,7 @@ static FormatMap generateFormatMap(const QEditorTheme& theme) {
 
 static constexpr int kMinEditorPointSize = 8;
 static constexpr int kMaxEditorPointSize = 40;
+static constexpr qreal kDefaultEditorLetterSpacingPercent = 102.0;
 
 static int clampEditorPointSize(int pointSize)
 {
@@ -577,24 +675,16 @@ static int clampEditorPointSize(int pointSize)
 static int editorPointSize(const QFont& font)
 {
     const int pointSize = QFontInfo(font).pointSize();
-    return pointSize > 0 ? pointSize : 14;
-}
-
-static int editorLineHeight(const QFont& font)
-{
-    return qMax(18, qRound(QFontMetricsF(font).lineSpacing() * 1.2));
+    return pointSize > 0 ? pointSize : 13;
 }
 
 static void applyEditorStyle(QPlainTextEdit* editor) {
-    const int lineHeightPx = editorLineHeight(editor->font());
-    QTextBlockFormat fmt;
-    fmt.setLineHeight(lineHeightPx, QTextBlockFormat::FixedHeight);
-    QTextCursor cursor(editor->document());
-    cursor.beginEditBlock();
-    cursor.select(QTextCursor::Document);
-    cursor.setBlockFormat(fmt);
-    cursor.clearSelection();
-    cursor.endEditBlock();
+    if (!editor)
+        return;
+
+    editor->setCursorWidth(EditorMetrics::kCursorWidth);
+    if (editor->document())
+        editor->document()->setDocumentMargin(EditorMetrics::kDocumentMargin);
 }
 
 // ── InnerEditor ──────────────────────────────────────────────────────────────
@@ -612,7 +702,32 @@ void InnerEditor::keyPressEvent(QKeyEvent* e) {
     if (d_ptr->m_completer && d_ptr->m_completer->handleKeyPress(e)) return;
     if (d_ptr->handleKeyPress(e)) return;
     QPlainTextEdit::keyPressEvent(e);
-    if (d_ptr->m_completer && !e->text().isEmpty())
+
+    if (!d_ptr->m_completer)
+        return;
+
+    switch (e->key()) {
+    case Qt::Key_Backspace:
+    case Qt::Key_Delete:
+        d_ptr->m_completer->updatePopup();
+        return;
+
+    case Qt::Key_Left:
+    case Qt::Key_Right:
+    case Qt::Key_Up:
+    case Qt::Key_Down:
+    case Qt::Key_Home:
+    case Qt::Key_End:
+    case Qt::Key_PageUp:
+    case Qt::Key_PageDown:
+        d_ptr->m_completer->dismissPopup();
+        return;
+
+    default:
+        break;
+    }
+
+    if (!e->text().isEmpty())
         d_ptr->m_completer->updatePopup();
 }
 
@@ -663,6 +778,9 @@ bool InnerEditor::foldedChipAt(const QPoint& pos, int* foldStart, QRect* chipRec
 
 void InnerEditor::mousePressEvent(QMouseEvent* e)
 {
+    if (d_ptr->m_completer)
+        d_ptr->m_completer->dismissPopup();
+
     if (e->button() == Qt::LeftButton && !(e->modifiers() & Qt::AltModifier)
         && d_ptr->m_foldingEnabled && d_ptr->m_foldManager) {
         int foldStart = -1;
@@ -726,6 +844,13 @@ void InnerEditor::mouseMoveEvent(QMouseEvent* e)
         viewport()->unsetCursor();
         QToolTip::hideText();
     }
+}
+
+void InnerEditor::focusOutEvent(QFocusEvent* e)
+{
+    QPlainTextEdit::focusOutEvent(e);
+    if (d_ptr->m_completer)
+        d_ptr->m_completer->dismissPopup();
 }
 
 void InnerEditor::leaveEvent(QEvent* e)
@@ -1092,6 +1217,8 @@ CodeEditorPrivate::CodeEditorPrivate(CodeEditor* q, QWidget* parent)
     setupConnections();
     setupActions();
 
+    m_editor->setCursorWidth(EditorMetrics::kCursorWidth);
+    m_editor->document()->setDocumentMargin(EditorMetrics::kDocumentMargin);
     applyEditorStyle(m_editor);
     updateLineNumberAreaWidth(0);
 
@@ -1694,23 +1821,8 @@ bool CodeEditorPrivate::handleMultiCursorEdit(QKeyEvent* event)
 // ── Helpers ───────────────────────────────────────────────────────────────────
 void CodeEditorPrivate::enforceFixedLineHeight(int from, int charsAdded)
 {
-    if (charsAdded <= 0) return;
-
-    QTextBlock b   = m_editor->document()->findBlock(from);
-    QTextBlock end = m_editor->document()->findBlock(from + charsAdded);
-    QTextBlockFormat fmt;
-    fmt.setLineHeight(editorLineHeight(m_editor->font()), QTextBlockFormat::FixedHeight);
-    QTextCursor cur(m_editor->document());
-    cur.beginEditBlock();
-    while (b.isValid()) {
-        if (b.blockFormat().lineHeightType() != QTextBlockFormat::FixedHeight) {
-            cur.setPosition(b.position());
-            cur.setBlockFormat(fmt);
-        }
-        if (b == end) break;
-        b = b.next();
-    }
-    cur.endEditBlock();
+    Q_UNUSED(from);
+    Q_UNUSED(charsAdded);
 }
 
 void CodeEditorPrivate::onGutterMarkerToggled(int line, MarkerType type)
@@ -2395,16 +2507,21 @@ bool CodeEditorPrivate::handleKeyPress(QKeyEvent* event) {
         return moveExtraCursorsVertically(1);
     }
 
-    if (event->modifiers() & Qt::ControlModifier && event->key() == Qt::Key_T) {
-        static int themeIndex = 0;
-        static const std::function<QEditorTheme()> themes[] = {
-            QEditorTheme::oneDarkTheme, QEditorTheme::draculaTheme,
-            QEditorTheme::monokaiTheme, QEditorTheme::solarizedDarkTheme,
-            QEditorTheme::githubLightTheme, QEditorTheme::cursorDarkTheme,
-            QEditorTheme::cursorDarkTheme
-        };
-        themeIndex = (themeIndex + 1) % (int)(sizeof(themes)/sizeof(themes[0]));
-        q_ptr->setTheme(themes[themeIndex]());
+    if ((event->modifiers() & Qt::ControlModifier) && event->key() == Qt::Key_T) {
+        const QVector<ThemeCycleEntry> themes = buildThemeCycleEntries();
+        if (themes.isEmpty())
+            return false;
+
+        int currentIndex = -1;
+        for (int i = 0; i < themes.size(); ++i) {
+            if (sameThemeDefinition(m_theme, themes.at(i).theme)) {
+                currentIndex = i;
+                break;
+            }
+        }
+
+        const int nextIndex = (currentIndex + 1) % themes.size();
+        q_ptr->setTheme(themes.at(nextIndex).theme);
         return true;
     }
     if (event->key() == Qt::Key_Tab && m_editor->textCursor().hasSelection()) {
@@ -2721,9 +2838,10 @@ void CodeEditor::setTheme(const QEditorTheme& theme) {
     editorFont.setFixedPitch(true);
     editorFont.setStyleHint(QFont::Monospace);
     editorFont.setHintingPreference(QFont::PreferFullHinting);
-    editorFont.setLetterSpacing(QFont::PercentageSpacing, 100);
+    editorFont.setLetterSpacing(QFont::PercentageSpacing, kDefaultEditorLetterSpacingPercent);
     d->m_editor->setFont(editorFont);
-    d->m_editor->document()->setDocumentMargin(6);
+    d->m_editor->setCursorWidth(EditorMetrics::kCursorWidth);
+    d->m_editor->document()->setDocumentMargin(EditorMetrics::kDocumentMargin);
     QPalette pal = d->m_editor->palette();
     pal.setColor(QPalette::Base,             theme.background);
     pal.setColor(QPalette::Text,             theme.foreground);

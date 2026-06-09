@@ -198,6 +198,7 @@ namespace {
 
 static const QRegularExpression kIdentRe(
     QStringLiteral(R"(\b[A-Za-z_][A-Za-z0-9_]*\b)"));
+static constexpr int kAutoPopupMinPrefixLength = 2;
 
 static bool isReservedKeyword(const QString& w, const QStringList& kws) {
     for (const QString& k : kws)
@@ -239,11 +240,9 @@ AutoCompleter::AutoCompleter(QObject* parent)
 
 AutoCompleter::~AutoCompleter()
 {
-    if (m_popup) {
-        m_popup->hide();
+    m_rebuildTimer.stop();
+    if (m_popup)
         m_popup->deleteLater();
-        m_popup = nullptr;
-    }
 }
 
 // ── Editor attachment ─────────────────────────────────────────────────────────
@@ -254,7 +253,9 @@ void AutoCompleter::setEditor(QPlainTextEdit* editor)
         return;
 
     if (m_editor) {
-        disconnect(m_editor->document(), nullptr, this, nullptr);
+        disconnect(m_editor, nullptr, this, nullptr);
+        if (m_editor->document())
+            disconnect(m_editor->document(), nullptr, this, nullptr);
     }
     if (m_popup) {
         m_popup->hide();
@@ -270,6 +271,15 @@ void AutoCompleter::setEditor(QPlainTextEdit* editor)
     m_popup->hide();
     m_popup->setFont(m_editor->font());
 
+    connect(m_editor, &QObject::destroyed, this, [this]() {
+        m_rebuildTimer.stop();
+        m_editor = nullptr;
+        m_popup = nullptr;
+    });
+    connect(m_popup, &QObject::destroyed, this, [this]() {
+        m_popup = nullptr;
+    });
+
     connect(m_popup, &CompletionPopup::completionAccepted,
             this, &AutoCompleter::onCompletionAccepted);
 
@@ -277,6 +287,23 @@ void AutoCompleter::setEditor(QPlainTextEdit* editor)
         if (m_largeDocumentMode)
             return;
         m_rebuildTimer.start();
+    });
+
+    connect(m_editor, &QPlainTextEdit::selectionChanged, this, [this]() {
+        if (!m_editor || !m_popup || !m_popup->isVisible())
+            return;
+        if (m_editor->textCursor().hasSelection())
+            dismissPopup();
+    });
+
+    connect(m_editor->verticalScrollBar(), &QScrollBar::valueChanged, this, [this]() {
+        if (m_popup && m_popup->isVisible())
+            dismissPopup();
+    });
+
+    connect(m_editor->horizontalScrollBar(), &QScrollBar::valueChanged, this, [this]() {
+        if (m_popup && m_popup->isVisible())
+            dismissPopup();
     });
 
     applyThemeToPopup();
@@ -349,8 +376,7 @@ void AutoCompleter::setLargeDocumentMode(bool enabled)
     if (m_largeDocumentMode) {
         m_wordLastIndex.clear();
         rebuildEntries();
-        if (m_popup)
-            m_popup->hide();
+        dismissPopup();
     } else {
         rebuildDocumentIdentifiers();
     }
@@ -463,7 +489,7 @@ void AutoCompleter::insertCompletion(const QString& completion)
     tc.insertText(suffix);
     m_editor->setTextCursor(tc);
 
-    if (m_popup) m_popup->hide();
+    dismissPopup();
 }
 
 void AutoCompleter::onCompletionAccepted(const QString& text)
@@ -473,27 +499,42 @@ void AutoCompleter::onCompletionAccepted(const QString& text)
 
 // ── Main entry points ─────────────────────────────────────────────────────────
 
-void AutoCompleter::updatePopup()
+void AutoCompleter::updatePopup(bool force)
 {
     if (!m_editor || !m_popup) return;
 
     if (!m_themeApplied) applyThemeToPopup();
     m_popup->setFont(m_editor->font());
 
+    if (m_editor->textCursor().hasSelection()) {
+        dismissPopup();
+        return;
+    }
+
     const QString prefix = wordPrefixAtCursor();
+    if (!force && prefix.size() < kAutoPopupMinPrefixLength) {
+        dismissPopup();
+        return;
+    }
 
     // cursorRect() is already in viewport coordinates
     m_popup->showSuggestions(m_entries, prefix, m_editor->cursorRect());
 }
 
+void AutoCompleter::dismissPopup()
+{
+    if (m_popup && m_popup->isVisible())
+        m_popup->hide();
+}
+
 bool AutoCompleter::handleKeyPress(QKeyEvent* e)
 {
+    if (e->modifiers().testFlag(Qt::ControlModifier) && e->key() == Qt::Key_Space) {
+        updatePopup(true);
+        return true;
+    }
+
     if (!m_popup || !m_popup->isVisible()) {
-        // Ctrl+Space: force-open popup
-        if (e->modifiers().testFlag(Qt::ControlModifier) && e->key() == Qt::Key_Space) {
-            updatePopup();
-            return true;
-        }
         return false;
     }
 
@@ -501,23 +542,35 @@ bool AutoCompleter::handleKeyPress(QKeyEvent* e)
 
     // ── Accept ────────────────────────────────────────────────────────────
     case Qt::Key_Tab:
-    case Qt::Key_Enter:
-    case Qt::Key_Return: {
+    {
         const QString pick = m_popup->currentCompletion();
         if (!pick.isEmpty()) {
             insertCompletion(pick);
             e->accept();
             return true;
         }
-        m_popup->hide();
+        dismissPopup();
         return false;
     }
 
+    case Qt::Key_Enter:
+    case Qt::Key_Return:
+        dismissPopup();
+        return false;
+
     // ── Dismiss ───────────────────────────────────────────────────────────
     case Qt::Key_Escape:
-        m_popup->hide();
+        dismissPopup();
         e->accept();
         return true;
+
+    case Qt::Key_Left:
+    case Qt::Key_Right:
+    case Qt::Key_Home:
+    case Qt::Key_End:
+    case Qt::Key_Backtab:
+        dismissPopup();
+        return false;
 
     // ── Navigation (CodeWizard: J/K for down/up in normal mode; here arrows)
     case Qt::Key_Down:

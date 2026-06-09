@@ -9,8 +9,11 @@ QCodeEngine-C is a C programming-oriented editor widget and library built on **Q
 - **Tree-sitter Syntax Highlighting**: Fast and accurate C syntax highlighting using the robust `tree-sitter-c` grammar.
 - **Advanced Gutter System**: Multi-panel gutter handling line numbers, fold arrows, and margin markers (bookmarks, breakpoints, etc.).
 - **Code Folding**: Context-aware code folding powered by syntax tree traversal.
-- **Theme Support**: Includes built-in support for multiple themes (One Dark, Dracula, etc.). Use `Ctrl+T` to cycle through themes in the demo.
-- **Editor Aids**: Features auto-indentation, auto-bracket pairing, customizable keyword autocomplete, and toggleable comments (`Ctrl+/`).
+- **Theme Support**: Built-in themes plus JSON-based theme loading. Use `Ctrl+T` to cycle through available demo themes.
+- **Search and Replace**: Integrated find/replace bar with match highlighting and replace workflows.
+- **Editor Aids**: Auto-indentation, auto-bracket pairing, customizable keyword autocomplete, bracket guides, and toggleable comments (`Ctrl+/`).
+- **Navigation & Overview**: Function list popup (`Ctrl+Shift+O`) and an optional minimap.
+- **Diagnostics & Stability**: Syntax error detection, large-document performance modes, and growing regression test coverage.
 
 ## Architecture
 
@@ -21,7 +24,9 @@ The project is structured into two main parts:
    - `TreeSitterHighlighter`: Handles parsing text via tree-sitter and mapping syntax to styles.
    - `FoldManager`: Computes fold ranges dynamically based on the syntax tree nodes.
    - `GutterWidget`: Composed of modular left-to-right panels (`MarginArea`, `LineNumberArea`, and `FoldArea`).
-   - `AutoCompleter`: Provides a fast `QCompleter` interface over customizable keyword lists.
+   - `AutoCompleter`: Provides a custom popup-based completion system tuned for editor-style interaction.
+   - `MiniMapWidget`: Renders a compact overview of the current document and viewport.
+   - `FindReplaceBar`: Handles incremental search, replace, and match highlighting.
 
 ## Build Instructions
 
@@ -47,15 +52,17 @@ cmake --build .
 
 # Run the demo application
 ./QCodeEngine-C
+
+# Run the test suite
+ctest --output-on-failure
 ```
 
-## Roadmap & Upcoming Features
+## Near-Term Focus
 
-The engine is actively being improved and refined. Here are the features planned for the future:
+The current work is centered on polishing the editor surface and hardening the library:
 
-- **Incremental Parse Corrections**: Improving tree-sitter's incremental updates handling (offset coordinates mapping) to ensure 100% accuracy during heavy edits.
-- **Bracket Matching**: Highlighting the corresponding partner when the cursor is positioned next to an opening or closing bracket.
-- **Search and Replace API**: Completing the underlying engine to fully support robust searching and line-by-line replacing.
-- **Enhancing AutoCompleter**: Wiring custom keyword API to let host applications inject dynamic C-keywords and auto-completion snippets.
-- **Code Minimap**: Finalizing and exposing the Minimap API for a sublime-like code overview map.
-- **Automated Tests**: Adding comprehensive unit tests to ensure stability across highlighter features.
+- **Interaction Polish**: Continue tightening autocomplete, caret movement, popup dismissal, and keyboard behavior.
+- **Layout Polish**: Keep refining typography, line height, spacing, and viewport alignment for better readability.
+- **Theme UX**: Improve JSON theme workflows, demo exposure, and theme discovery behavior.
+- **Library Hardening**: Expand regression coverage around search/replace, layout, minimap behavior, and editor edge cases.
+- **C-aware Intelligence**: Better completion ranking, snippets, and richer symbol-aware editing are the next major feature layer after polish work.

@@ -18,6 +18,7 @@
 
 class QKeyEvent;
 class QMouseEvent;
+class QFocusEvent;
 class QEvent;
 class LiveIndentController;
 
@@ -75,6 +76,7 @@ protected:
     void keyPressEvent(QKeyEvent* e) override;
     void mousePressEvent(QMouseEvent* e) override;
     void mouseMoveEvent(QMouseEvent* e) override;
+    void focusOutEvent(QFocusEvent* e) override;
     void leaveEvent(QEvent* e) override;
     void paintEvent(QPaintEvent* e) override;
 
