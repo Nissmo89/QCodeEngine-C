@@ -136,6 +136,68 @@ void writeColorListField(QJsonObject& obj, const char* key, const QList<QColor>&
     obj[QLatin1String(key)] = array;
 }
 
+QColor minimapColorWithDefaultAlpha(QColor color, int alpha)
+{
+    if (color.isValid() && color.alpha() == 255)
+        color.setAlpha(alpha);
+    return color;
+}
+
+QColor deriveMinimapBorderColor(const QEditorTheme& theme)
+{
+    QColor border = theme.gutterBorderColor.isValid() ? theme.gutterBorderColor : theme.foreground;
+    if (!border.isValid())
+        return QColor(70, 76, 84, 220);
+
+    if (theme.minimapBackground.isValid()
+        && qAbs(border.lightness() - theme.minimapBackground.lightness()) < 24) {
+        border = theme.minimapBackground.lightness() < 128 ? border.lighter(165)
+                                                           : border.darker(165);
+    }
+    return minimapColorWithDefaultAlpha(border, 220);
+}
+
+void applyDefaultMinimapTheme(QEditorTheme& theme)
+{
+    if (!theme.minimapBackground.isValid()) {
+        theme.minimapBackground = theme.gutterBackground.isValid()
+            ? theme.gutterBackground
+            : theme.background;
+    }
+
+    if (!theme.minimapBorderColor.isValid())
+        theme.minimapBorderColor = deriveMinimapBorderColor(theme);
+
+    if (!theme.minimapTrackColor.isValid()) {
+        QColor track = theme.gutterBorderColor.isValid() ? theme.gutterBorderColor : theme.tokenComment;
+        if (!track.isValid())
+            track = QColor(80, 86, 95);
+        theme.minimapTrackColor = minimapColorWithDefaultAlpha(track, 95);
+    }
+
+    if (!theme.minimapViewportColor.isValid()) {
+        QColor thumb = theme.selectionBackground.isValid() ? theme.selectionBackground : theme.accent;
+        if (!thumb.isValid())
+            thumb = QColor(110, 118, 129);
+        theme.minimapViewportColor = minimapColorWithDefaultAlpha(thumb, 120);
+    }
+
+    if (!theme.minimapCaretColor.isValid())
+        theme.minimapCaretColor = theme.accent.isValid() ? theme.accent : QColor(84, 174, 255);
+
+    if (!theme.minimapErrorColor.isValid()) {
+        theme.minimapErrorColor = theme.diagnosticError.isValid()
+            ? theme.diagnosticError
+            : QColor(224, 76, 76);
+    }
+
+    if (!theme.minimapWarningColor.isValid()) {
+        theme.minimapWarningColor = theme.diagnosticWarning.isValid()
+            ? theme.diagnosticWarning
+            : QColor(236, 169, 62);
+    }
+}
+
 } // namespace
 
 QEditorTheme QEditorTheme::own_theme() {
@@ -208,6 +270,7 @@ QEditorTheme QEditorTheme::own_theme() {
     t.fontFamily = defaultEditorFontFamily();
     t.fontSize   = 13;
 
+    applyDefaultMinimapTheme(t);
     return t;
 }
 
@@ -281,6 +344,7 @@ QEditorTheme QEditorTheme::cursorDarkTheme() {
     t.fontFamily = defaultEditorFontFamily();
     t.fontSize   = 13;
 
+    applyDefaultMinimapTheme(t);
     return t;
 }
 
@@ -344,6 +408,7 @@ QEditorTheme QEditorTheme::draculaTheme() {
     t.fontFamily = defaultEditorFontFamily();
     t.fontSize   = 13;
 
+    applyDefaultMinimapTheme(t);
     return t;
 }
 
@@ -409,6 +474,7 @@ QEditorTheme QEditorTheme::monokaiTheme() {
     t.fontFamily = defaultEditorFontFamily();
     t.fontSize   = 13;
 
+    applyDefaultMinimapTheme(t);
     return t;
 }
 
@@ -472,6 +538,7 @@ QEditorTheme QEditorTheme::oneDarkTheme() {
     t.fontFamily = defaultEditorFontFamily();
     t.fontSize   = 13;
 
+    applyDefaultMinimapTheme(t);
     return t;
 }
 
@@ -537,6 +604,7 @@ QEditorTheme QEditorTheme::solarizedDarkTheme() {
     t.fontFamily = defaultEditorFontFamily();
     t.fontSize   = 13;
 
+    applyDefaultMinimapTheme(t);
     return t;
 }
 
@@ -602,6 +670,7 @@ QEditorTheme QEditorTheme::githubLightTheme() {
     t.fontFamily = defaultEditorFontFamily();
     t.fontSize   = 13;
 
+    applyDefaultMinimapTheme(t);
     return t;
 }
 
@@ -619,6 +688,13 @@ QEditorTheme QEditorTheme::fromJsonString(const QString& jsonStr) {
 
     const QJsonObject obj = doc.object();
     QEditorTheme t = draculaTheme();
+    const bool hasMinimapBackground = obj.contains("minimapBackground");
+    const bool hasMinimapBorderColor = obj.contains("minimapBorderColor");
+    const bool hasMinimapTrackColor = obj.contains("minimapTrackColor");
+    const bool hasMinimapViewportColor = obj.contains("minimapViewportColor");
+    const bool hasMinimapCaretColor = obj.contains("minimapCaretColor");
+    const bool hasMinimapErrorColor = obj.contains("minimapErrorColor");
+    const bool hasMinimapWarningColor = obj.contains("minimapWarningColor");
 
     readStringField(obj, "name", t.name);
 
@@ -671,7 +747,12 @@ QEditorTheme QEditorTheme::fromJsonString(const QString& jsonStr) {
     readColorField(obj, "searchCurrentMatchBackground", t.searchCurrentMatchBackground);
 
     readColorField(obj, "minimapBackground", t.minimapBackground);
+    readColorField(obj, "minimapBorderColor", t.minimapBorderColor);
+    readColorField(obj, "minimapTrackColor", t.minimapTrackColor);
     readColorField(obj, "minimapViewportColor", t.minimapViewportColor);
+    readColorField(obj, "minimapCaretColor", t.minimapCaretColor);
+    readColorField(obj, "minimapErrorColor", t.minimapErrorColor);
+    readColorField(obj, "minimapWarningColor", t.minimapWarningColor);
 
     readColorField(obj, "indentGuideColor", t.indentGuideColor);
     readBoolField(obj, "showIndentGuides", t.showIndentGuides);
@@ -683,6 +764,23 @@ QEditorTheme QEditorTheme::fromJsonString(const QString& jsonStr) {
     readColorField(obj, "diagnosticWarning", t.diagnosticWarning);
     readColorField(obj, "diagnosticInfo", t.diagnosticInfo);
     readColorField(obj, "diagnosticHint", t.diagnosticHint);
+
+    if (!hasMinimapBackground)
+        t.minimapBackground = QColor();
+    if (!hasMinimapBorderColor)
+        t.minimapBorderColor = QColor();
+    if (!hasMinimapTrackColor)
+        t.minimapTrackColor = QColor();
+    if (!hasMinimapViewportColor)
+        t.minimapViewportColor = QColor();
+    if (!hasMinimapCaretColor)
+        t.minimapCaretColor = QColor();
+    if (!hasMinimapErrorColor)
+        t.minimapErrorColor = QColor();
+    if (!hasMinimapWarningColor)
+        t.minimapWarningColor = QColor();
+
+    applyDefaultMinimapTheme(t);
 
     return t;
 }
@@ -747,7 +845,12 @@ QString QEditorTheme::toJsonString() const {
     writeColorField(obj, "searchCurrentMatchBackground", searchCurrentMatchBackground);
 
     writeColorField(obj, "minimapBackground", minimapBackground);
+    writeColorField(obj, "minimapBorderColor", minimapBorderColor);
+    writeColorField(obj, "minimapTrackColor", minimapTrackColor);
     writeColorField(obj, "minimapViewportColor", minimapViewportColor);
+    writeColorField(obj, "minimapCaretColor", minimapCaretColor);
+    writeColorField(obj, "minimapErrorColor", minimapErrorColor);
+    writeColorField(obj, "minimapWarningColor", minimapWarningColor);
 
     writeColorField(obj, "indentGuideColor", indentGuideColor);
     obj["showIndentGuides"] = showIndentGuides;

@@ -1239,16 +1239,17 @@ CodeEditorPrivate::~CodeEditorPrivate()
 void CodeEditorPrivate::setupLayout()
 {
     m_gutter = new GutterWidget(m_editor, q_ptr);
-    m_miniMap = new MiniMapWidget(m_editor, q_ptr);
+    m_miniMap = new MiniMapWidget(m_editor);
     m_miniMap->setTheme(m_theme);
-    m_miniMap->setVisible(false);
+    m_miniMap->setOverviewVisible(false);
+    m_editor->setVerticalScrollBar(m_miniMap);
+    m_editor->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 
     QHBoxLayout* layout = new QHBoxLayout(q_ptr);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
     layout->addWidget(m_gutter);
     layout->addWidget(m_editor);
-    layout->addWidget(m_miniMap);
 }
 
 // ── Tree-sitter highlighter ───────────────────────────────────────────────────
@@ -1282,6 +1283,8 @@ void CodeEditorPrivate::setupEditorModules()
     m_diagnosticManager->setWarningColor(m_theme.diagnosticWarning);
     m_diagnosticManager->setInfoColor   (m_theme.diagnosticInfo);
     m_diagnosticManager->setHintColor   (m_theme.diagnosticHint);
+    if (m_miniMap)
+        m_miniMap->setDiagnosticManager(m_diagnosticManager);
 
     // SyntaxErrorDetector — walks TSTree* for ERROR/MISSING nodes,
     // feeds DiagnosticManager, and gates TCC compilation
@@ -1507,12 +1510,13 @@ void CodeEditorPrivate::syncMiniMapVisibility()
     if (!m_miniMap)
         return;
 
-    const bool visible = m_miniMapVisibleRequested
-                         && !m_largeFileMode
-                         && !m_asyncLoadInProgress;
-    m_miniMap->setVisible(visible);
-    if (visible)
-        m_miniMap->update();
+    const bool overviewVisible = m_miniMapVisibleRequested
+                                 && !m_largeFileMode
+                                 && !m_asyncLoadInProgress;
+    m_editor->setVerticalScrollBarPolicy(
+        overviewVisible ? Qt::ScrollBarAlwaysOn : Qt::ScrollBarAsNeeded);
+    m_miniMap->setOverviewVisible(overviewVisible);
+    m_miniMap->update();
 }
 
 bool CodeEditorPrivate::dispatchPluginKeyPress(QKeyEvent* event)

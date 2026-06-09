@@ -86,7 +86,12 @@ void compareThemes(const QEditorTheme& actual, const QEditorTheme& expected)
     QCOMPARE(actual.searchCurrentMatchBackground, expected.searchCurrentMatchBackground);
 
     QCOMPARE(actual.minimapBackground, expected.minimapBackground);
+    QCOMPARE(actual.minimapBorderColor, expected.minimapBorderColor);
+    QCOMPARE(actual.minimapTrackColor, expected.minimapTrackColor);
     QCOMPARE(actual.minimapViewportColor, expected.minimapViewportColor);
+    QCOMPARE(actual.minimapCaretColor, expected.minimapCaretColor);
+    QCOMPARE(actual.minimapErrorColor, expected.minimapErrorColor);
+    QCOMPARE(actual.minimapWarningColor, expected.minimapWarningColor);
     QCOMPARE(actual.indentGuideColor, expected.indentGuideColor);
     QCOMPARE(actual.showIndentGuides, expected.showIndentGuides);
 
@@ -130,7 +135,12 @@ void TestThemeJson::jsonRoundTripPreservesThemeFields()
     original.functionBold = true;
     original.typeBold = true;
     original.searchCurrentMatchBackground = QColor("#66112233");
+    original.minimapBorderColor = QColor("#556677");
+    original.minimapTrackColor = QColor("#22334488");
     original.minimapViewportColor = QColor("#22446688");
+    original.minimapCaretColor = QColor("#88bbff");
+    original.minimapErrorColor = QColor("#ff4455");
+    original.minimapWarningColor = QColor("#ffaa33");
     original.indentGuideColor = QColor("#1d1d1d");
     original.showIndentGuides = false;
     original.fontFamily = "Fira Code";

@@ -1,205 +1,337 @@
 #include "CodeEditor/MiniMapWidget.h"
-#include "EditorMetrics.h"
+#include "CodeEditor/diagnosticmanager.h"
 
-#include <QPlainTextEdit>
-#include <QPainter>
-#include <QScrollBar>
-#include <QTextBlock>
-#include <QTextCursor>
-#include <QTextDocument>
 #include <QMouseEvent>
-#include <qplaintextedit.h>
+#include <QPainter>
+#include <QPlainTextEdit>
+#include <QTextDocument>
 
 namespace {
 
-static int clampEditorLine(int line, int totalLines)
-{
-    return qBound(0, line, qMax(0, totalLines - 1));
+static constexpr int kOverviewScrollbarWidth = 14;
+static constexpr int kOverviewScrollbarMinWidth = 12;
+static constexpr int kDefaultScrollbarWidth = 12;
+static constexpr int kBorderWidth = 1;
+static constexpr int kThumbMinHeight = 26;
+static constexpr int kMarkerHeight = 3;
+static constexpr int kCaretHeight = 4;
+
+static int clampEditorLine(int line, int totalLines) {
+  return qBound(0, line, qMax(0, totalLines - 1));
 }
 
-static int effectiveEditorLineHeight(const QPlainTextEdit* editor)
-{
-    if (!editor)
-        return EditorMetrics::kFallbackLineHeight;
+static QRect contentRectForWidget(const QRect &widgetRect) {
+  return widgetRect.adjusted(kBorderWidth, 0, 0, 0);
+}
 
-    return EditorMetrics::effectiveLineHeight(editor->font());
+static QRect trackRectForContent(const QRect &contentRect) {
+  if (contentRect.isEmpty())
+    return {};
+
+  return contentRect;
+}
+
+static int markerYForLine(int line, int totalLines, const QRect &contentRect) {
+  if (contentRect.isEmpty())
+    return 0;
+
+  if (totalLines <= 1 || contentRect.height() <= 1)
+    return contentRect.top();
+
+  const qreal ratio = static_cast<qreal>(clampEditorLine(line, totalLines)) /
+                      static_cast<qreal>(totalLines - 1);
+  return contentRect.top() + qRound(ratio * (contentRect.height() - 1));
+}
+
+static QRect markerRectForY(const QRect &contentRect, int y, int height) {
+  if (contentRect.isEmpty())
+    return {};
+
+  QRect markerRect(contentRect.left(), y - (height / 2), contentRect.width(),
+                   qMax(1, height));
+  return markerRect.intersected(contentRect);
+}
+
+static QRect thumbRectForScrollBar(const QScrollBar *scrollBar,
+                                   const QRect &contentRect,
+                                   const QRect &trackRect) {
+  if (!scrollBar || contentRect.isEmpty() || trackRect.isEmpty())
+    return {};
+
+  const int minimum = scrollBar->minimum();
+  const int maximum = scrollBar->maximum();
+  const int pageStep = qMax(1, scrollBar->pageStep());
+  const int trackHeight = qMax(1, contentRect.height());
+  const int totalRange = qMax(1, (maximum - minimum) + pageStep);
+  const int thumbHeight =
+      qBound(qMin(kThumbMinHeight, trackHeight),
+             qRound((static_cast<qreal>(pageStep) / totalRange) * trackHeight),
+             trackHeight);
+
+  const int available = qMax(0, trackHeight - thumbHeight);
+  qreal ratio = 0.0;
+  if (maximum > minimum) {
+    ratio = static_cast<qreal>(scrollBar->sliderPosition() - minimum) /
+            static_cast<qreal>(maximum - minimum);
+  }
+  ratio = qBound<qreal>(0.0, ratio, 1.0);
+
+  const int top = contentRect.top() + qRound(ratio * available);
+  return QRect(trackRect.left(), top, trackRect.width(), thumbHeight)
+      .intersected(contentRect);
 }
 
 } // namespace
 
-MiniMapWidget::MiniMapWidget(QPlainTextEdit* editor, QWidget* parent)
-    : QWidget(parent)
-{
-    setAttribute(Qt::WA_OpaquePaintEvent, true);
-    setMouseTracking(true);
-    setFocusPolicy(Qt::NoFocus);
-    setMiniMapWidth(m_width);
-    setEditor(editor);
+MiniMapWidget::MiniMapWidget(QPlainTextEdit *editor, QWidget *parent)
+    : QScrollBar(Qt::Vertical, parent) {
+  setAttribute(Qt::WA_OpaquePaintEvent, true);
+  setMouseTracking(true);
+  setFocusPolicy(Qt::NoFocus);
+  m_overviewWidth = kOverviewScrollbarWidth;
+  m_scrollBarWidth = kDefaultScrollbarWidth;
+  applyWidth();
+
+  connect(this, &QScrollBar::valueChanged, this,
+          qOverload<>(&MiniMapWidget::update));
+  connect(this, &QScrollBar::rangeChanged, this,
+          [this](int, int) { update(); });
+  connect(this, &QScrollBar::sliderMoved, this, [this](int) { update(); });
+
+  setEditor(editor);
 }
 
-void MiniMapWidget::setEditor(QPlainTextEdit* editor)
-{
-    if (m_editor == editor)
-        return;
+void MiniMapWidget::setEditor(QPlainTextEdit *editor) {
+  if (m_editor == editor)
+    return;
 
-    if (m_editor) {
-        disconnect(m_editor, nullptr, this, nullptr);
-        if (m_editor->verticalScrollBar())
-            disconnect(m_editor->verticalScrollBar(), nullptr, this, nullptr);
-        if (m_editor->document())
-            disconnect(m_editor->document(), nullptr, this, nullptr);
+  if (m_editor) {
+    disconnect(m_editor, nullptr, this, nullptr);
+    if (m_editor->document())
+      disconnect(m_editor->document(), nullptr, this, nullptr);
+  }
+
+  m_editor = editor;
+  reconnectEditorSignals();
+  update();
+}
+
+void MiniMapWidget::setDiagnosticManager(DiagnosticManager *diagnosticManager) {
+  if (m_diagnosticManager == diagnosticManager)
+    return;
+
+  if (m_diagnosticManager)
+    disconnect(m_diagnosticManager, nullptr, this, nullptr);
+
+  m_diagnosticManager = diagnosticManager;
+  if (m_diagnosticManager) {
+    connect(m_diagnosticManager, &DiagnosticManager::diagnosticsChanged, this,
+            qOverload<>(&MiniMapWidget::update));
+  }
+
+  update();
+}
+
+void MiniMapWidget::setTheme(const QEditorTheme &theme) {
+  m_background = theme.minimapBackground.isValid()
+                     ? theme.minimapBackground
+                     : theme.gutterBackground.darker(108);
+
+  m_borderColor = theme.minimapBorderColor;
+  if (!m_borderColor.isValid())
+    m_borderColor = QColor(70, 76, 84, 220);
+
+  m_trackColor = theme.minimapTrackColor;
+  if (!m_trackColor.isValid())
+    m_trackColor = QColor(80, 86, 95, 95);
+
+  m_thumbColor = theme.minimapViewportColor.isValid()
+                     ? theme.minimapViewportColor
+                     : theme.selectionBackground;
+  if (!m_thumbColor.isValid())
+    m_thumbColor = QColor(110, 118, 129, 120);
+
+  m_caretColor = theme.minimapCaretColor.isValid() ? theme.minimapCaretColor
+                                                   : QColor(84, 174, 255);
+  m_errorColor = theme.minimapErrorColor.isValid() ? theme.minimapErrorColor
+                                                   : QColor(224, 76, 76);
+  m_warningColor = theme.minimapWarningColor.isValid() ? theme.minimapWarningColor
+                                                       : QColor(236, 169, 62);
+  update();
+}
+
+void MiniMapWidget::setOverviewVisible(bool visible) {
+  if (m_overviewVisible == visible)
+    return;
+
+  m_overviewVisible = visible;
+  applyWidth();
+  update();
+}
+
+void MiniMapWidget::setMiniMapWidth(int width) {
+  m_overviewWidth = qMax(kOverviewScrollbarMinWidth, width);
+  applyWidth();
+}
+
+QSize MiniMapWidget::sizeHint() const {
+  const int width = m_overviewVisible ? m_overviewWidth : m_scrollBarWidth;
+  return QSize(width, 220);
+}
+
+QSize MiniMapWidget::minimumSizeHint() const { return sizeHint(); }
+
+void MiniMapWidget::paintEvent(QPaintEvent *event) {
+  Q_UNUSED(event);
+
+  QPainter painter(this);
+  painter.fillRect(rect(),
+                   m_background.isValid() ? m_background : QColor(24, 26, 29));
+  painter.fillRect(QRect(rect().left(), rect().top(), 1, rect().height()),
+                   m_borderColor.isValid() ? m_borderColor
+                                           : QColor(70, 76, 84, 150));
+
+  const QRect contentRect = contentRectForWidget(rect());
+  const QRect trackRect = trackRectForContent(contentRect);
+  if (contentRect.isEmpty() || trackRect.isEmpty())
+    return;
+
+  const QColor trackColor =
+      m_trackColor.isValid() ? m_trackColor : QColor(80, 86, 95, 95);
+
+  painter.setPen(Qt::NoPen);
+  painter.setBrush(trackColor);
+  painter.drawRect(trackRect);
+
+  if (!m_overviewVisible || !m_editor || !m_editor->document()) {
+    const QRect thumbRect = thumbRectForScrollBar(this, contentRect, trackRect);
+    if (!thumbRect.isEmpty()) {
+      painter.setBrush(m_thumbColor.isValid() ? m_thumbColor
+                                              : QColor(110, 118, 129, 120));
+      painter.drawRect(thumbRect);
     }
+    return;
+  }
 
-    m_editor = editor;
-    reconnectEditorSignals();
+  const int totalLines = qMax(1, m_editor->document()->blockCount());
+  if (m_diagnosticManager) {
+    const QList<Diagnostic> &diagnostics = m_diagnosticManager->diagnostics();
+    for (const Diagnostic &diagnostic : diagnostics) {
+      QColor markerColor;
+      switch (diagnostic.severity) {
+      case Diagnostic::Error:
+        markerColor = m_errorColor;
+        break;
+      case Diagnostic::Warning:
+        markerColor = m_warningColor;
+        break;
+      default:
+        continue;
+      }
+
+      const int markerY =
+          markerYForLine(diagnostic.line, totalLines, contentRect);
+      const QRect markerRect =
+          markerRectForY(trackRect, markerY, kMarkerHeight);
+      painter.setBrush(markerColor);
+      painter.drawRect(markerRect);
+    }
+  }
+
+  const int caretLine = m_editor->textCursor().blockNumber();
+  const int caretY = markerYForLine(caretLine, totalLines, contentRect);
+  const QRect caretRect = markerRectForY(trackRect, caretY, kCaretHeight);
+  painter.setBrush(m_caretColor.isValid() ? m_caretColor
+                                          : QColor(84, 174, 255));
+  painter.drawRect(caretRect);
+
+  const QRect thumbRect = thumbRectForScrollBar(this, contentRect, trackRect);
+  if (!thumbRect.isEmpty()) {
+    const QColor thumbColor =
+        m_thumbColor.isValid() ? m_thumbColor : QColor(110, 118, 129, 120);
+    painter.setBrush(thumbColor);
+    painter.drawRect(thumbRect);
+  }
+}
+
+void MiniMapWidget::mousePressEvent(QMouseEvent *event) {
+  if (event->button() == Qt::LeftButton) {
+    m_dragging = true;
+    setSliderDown(true);
+    scrollToY(static_cast<int>(event->position().y()));
+    event->accept();
+    return;
+  }
+
+  QScrollBar::mousePressEvent(event);
+}
+
+void MiniMapWidget::mouseMoveEvent(QMouseEvent *event) {
+  if (m_dragging) {
+    scrollToY(static_cast<int>(event->position().y()));
+    event->accept();
+    return;
+  }
+
+  QScrollBar::mouseMoveEvent(event);
+}
+
+void MiniMapWidget::mouseReleaseEvent(QMouseEvent *event) {
+  if (event->button() == Qt::LeftButton && m_dragging) {
+    m_dragging = false;
+    setSliderDown(false);
+    event->accept();
+    return;
+  }
+
+  QScrollBar::mouseReleaseEvent(event);
+}
+
+int MiniMapWidget::scrollValueForY(int y) const {
+  const QRect contentRect = contentRectForWidget(rect());
+  const QRect trackRect = trackRectForContent(contentRect);
+  const QRect thumbRect = thumbRectForScrollBar(this, contentRect, trackRect);
+  if (contentRect.isEmpty() || thumbRect.isEmpty())
+    return minimum();
+
+  const int rangeSpan = maximum() - minimum();
+  if (rangeSpan <= 0)
+    return minimum();
+
+  const int contentTop = contentRect.top();
+  const int localY =
+      qBound(0, y - contentTop, qMax(0, contentRect.height() - 1));
+  const int available = qMax(1, contentRect.height() - thumbRect.height());
+  const qreal ratio = qBound<qreal>(
+      0.0, static_cast<qreal>(localY - (thumbRect.height() / 2)) / available,
+      1.0);
+
+  return minimum() + qRound(ratio * rangeSpan);
+}
+
+void MiniMapWidget::scrollToY(int y) { setValue(scrollValueForY(y)); }
+
+void MiniMapWidget::reconnectEditorSignals() {
+  if (!m_editor)
+    return;
+
+  connect(m_editor, &QObject::destroyed, this, [this]() {
+    m_editor = nullptr;
     update();
+  });
+  connect(m_editor, &QPlainTextEdit::cursorPositionChanged, this,
+          qOverload<>(&MiniMapWidget::update));
+  connect(m_editor, &QPlainTextEdit::updateRequest, this,
+          [this](const QRect &, int) { update(); });
+  if (m_editor->document()) {
+    connect(m_editor->document(), &QTextDocument::contentsChanged, this,
+            qOverload<>(&MiniMapWidget::update));
+  }
 }
 
-void MiniMapWidget::setTheme(const QEditorTheme& theme)
-{
-    m_background = theme.gutterBackground.darker(112);
-    m_lineColor = theme.tokenComment;
-    m_lineColor.setAlpha(130);
-    m_viewportFill = theme.selectionBackground;
-    m_viewportFill.setAlpha(85);
-    m_viewportBorder = theme.accent;
-    m_viewportBorder.setAlpha(190);
-    update();
-}
-
-void MiniMapWidget::setMiniMapWidth(int width)
-{
-    m_width = qMax(72, width);
-    setMinimumWidth(m_width);
-    setMaximumWidth(m_width);
-    updateGeometry();
-}
-
-QSize MiniMapWidget::sizeHint() const
-{
-    return QSize(m_width, 220);
-}
-
-void MiniMapWidget::paintEvent(QPaintEvent* event)
-{
-    Q_UNUSED(event);
-
-    QPainter painter(this);
-    painter.fillRect(rect(), m_background.isValid() ? m_background : QColor(28, 30, 34));
-
-    if (!m_editor || !m_editor->document())
-        return;
-
-    const int totalLines = qMax(1, m_editor->document()->blockCount());
-    const QRect contentRect = rect().adjusted(2, 2, -2, -2);
-    const int h = qMax(1, contentRect.height());
-    const int w = qMax(1, contentRect.width());
-
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(m_lineColor.isValid() ? m_lineColor : QColor(120, 130, 145, 140));
-
-    const double linesPerPixel = static_cast<double>(totalLines) / static_cast<double>(h);
-    for (int py = 0; py < h; ++py) {
-        const int line = clampEditorLine(static_cast<int>(py * linesPerPixel), totalLines);
-        const QTextBlock block = m_editor->document()->findBlockByNumber(line);
-        const int len = block.isValid() ? block.text().size() : 0;
-        const int lineWidth = qBound(3, 3 + (len * (w - 4)) / 220, w);
-        painter.drawRect(contentRect.left(), contentRect.top() + py, lineWidth, 1);
-    }
-
-    const QTextCursor topCursor = m_editor->cursorForPosition(QPoint(0, 0));
-    const int firstVisibleLine = qMax(0, topCursor.blockNumber());
-    const int lineHeight = qMax(1, effectiveEditorLineHeight(m_editor));
-    const int visibleLines = qMax(1, m_editor->viewport()->height() / lineHeight + 1);
-
-    const int topY = contentRect.top()
-                     + static_cast<int>((static_cast<double>(firstVisibleLine) / totalLines) * h);
-    const int bottomLine = qMin(totalLines, firstVisibleLine + visibleLines);
-    const int bottomY = contentRect.top()
-                        + static_cast<int>((static_cast<double>(bottomLine) / totalLines) * h);
-    const int viewportHeight = qMax(8, bottomY - topY);
-
-    QRect viewportRect(contentRect.left(), topY, contentRect.width(), viewportHeight);
-    viewportRect = viewportRect.intersected(contentRect);
-
-    painter.setBrush(m_viewportFill.isValid() ? m_viewportFill : QColor(90, 120, 180, 85));
-    painter.setPen(QPen(m_viewportBorder.isValid() ? m_viewportBorder : QColor(115, 150, 220, 200), 1));
-    painter.drawRect(viewportRect);
-}
-
-void MiniMapWidget::mousePressEvent(QMouseEvent* event)
-{
-    if (event->button() == Qt::LeftButton) {
-        m_dragging = true;
-        navigateToY(static_cast<int>(event->position().y()));
-        event->accept();
-        return;
-    }
-    QWidget::mousePressEvent(event);
-}
-
-void MiniMapWidget::mouseMoveEvent(QMouseEvent* event)
-{
-    if (m_dragging) {
-        navigateToY(static_cast<int>(event->position().y()));
-        event->accept();
-        return;
-    }
-    QWidget::mouseMoveEvent(event);
-}
-
-void MiniMapWidget::mouseReleaseEvent(QMouseEvent* event)
-{
-    if (event->button() == Qt::LeftButton)
-        m_dragging = false;
-    QWidget::mouseReleaseEvent(event);
-}
-
-int MiniMapWidget::lineForY(int y) const
-{
-    if (!m_editor || !m_editor->document())
-        return 0;
-
-    const int totalLines = qMax(1, m_editor->document()->blockCount());
-    const QRect contentRect = rect().adjusted(2, 2, -2, -2);
-    const int localY = qBound(0, y - contentRect.top(), qMax(0, contentRect.height()));
-    const int line = static_cast<int>(
-        (static_cast<double>(localY) / qMax(1, contentRect.height())) * totalLines);
-    return clampEditorLine(line, totalLines);
-}
-
-void MiniMapWidget::navigateToY(int y)
-{
-    if (!m_editor || !m_editor->document())
-        return;
-
-    const int line = lineForY(y);
-    const QTextBlock block = m_editor->document()->findBlockByNumber(line);
-    if (!block.isValid())
-        return;
-
-    QTextCursor cursor(block);
-    m_editor->setTextCursor(cursor);
-    m_editor->centerCursor();
-}
-
-void MiniMapWidget::reconnectEditorSignals()
-{
-    if (!m_editor)
-        return;
-
-    if (m_editor->document()) {
-        connect(m_editor->document(), &QTextDocument::contentsChanged,
-                this, qOverload<>(&MiniMapWidget::update));
-    }
-    connect(m_editor, &QPlainTextEdit::cursorPositionChanged,
-            this, qOverload<>(&MiniMapWidget::update));
-    connect(m_editor, &QPlainTextEdit::updateRequest,
-            this, [this](const QRect&, int) { update(); });
-    if (m_editor->verticalScrollBar()) {
-        connect(m_editor->verticalScrollBar(), &QScrollBar::valueChanged,
-                this, qOverload<>(&MiniMapWidget::update));
-        connect(m_editor->verticalScrollBar(), &QScrollBar::rangeChanged,
-                this, [this](int, int) { update(); });
-    }
+void MiniMapWidget::applyWidth() {
+  const int width = m_overviewVisible ? m_overviewWidth : m_scrollBarWidth;
+  setMinimumWidth(width);
+  setMaximumWidth(width);
+  updateGeometry();
 }

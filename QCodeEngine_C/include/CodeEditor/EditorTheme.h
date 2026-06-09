@@ -61,7 +61,12 @@ struct QEditorTheme {
 
     // Minimap
     QColor minimapBackground;
-    QColor minimapViewportColor;  // the visible-area box
+    QColor minimapBorderColor;
+    QColor minimapTrackColor;
+    QColor minimapViewportColor;  // the visible-area handle
+    QColor minimapCaretColor;
+    QColor minimapErrorColor;
+    QColor minimapWarningColor;
 
     // Indentation guides
     QColor indentGuideColor;
