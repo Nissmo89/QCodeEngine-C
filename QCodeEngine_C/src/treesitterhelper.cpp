@@ -1,9 +1,155 @@
 #include "treesitterhelper.h"
+#include "TreeSitterQuery_C.h"
 #include "qregularexpression.h"
 #include <QDebug>
+#include <QHash>
 #include <cstring> // for strcmp
 #include <iostream>
 #include <QTextBlock>
+#include <algorithm>
+#include <string>
+#include <vector>
+
+namespace {
+
+QString normalizedByteRangeText(const QByteArray& sourceBytes, uint32_t startByte, uint32_t endByte)
+{
+    if (endByte <= startByte || static_cast<int>(startByte) >= sourceBytes.size())
+        return {};
+
+    const int length = qMin(static_cast<int>(endByte - startByte),
+                            sourceBytes.size() - static_cast<int>(startByte));
+    QString text = QString::fromUtf8(sourceBytes.mid(startByte, length));
+    text.replace(QRegularExpression("/\\*.*?\\*/", QRegularExpression::DotMatchesEverythingOption), " ");
+    text.replace(QRegularExpression("//[^\\n]*"), "");
+    text.replace("\r\n", " ");
+    text.replace("\n", " ");
+    text.replace("\r", " ");
+    text.replace(QRegularExpression("\\s+"), " ");
+    text = text.trimmed();
+    text.replace(" (", "(");
+    text.replace("( ", "(");
+    text.replace(" )", ")");
+    text.replace(") ", ")");
+    return text;
+}
+
+QString normalizedNodeText(const QByteArray& sourceBytes, TSNode node)
+{
+    if (ts_node_is_null(node))
+        return {};
+
+    const uint32_t startByte = ts_node_start_byte(node);
+    const uint32_t endByte = ts_node_end_byte(node);
+    return normalizedByteRangeText(sourceBytes, startByte, endByte);
+}
+
+QString nodeText(const QByteArray& sourceBytes, TSNode node)
+{
+    if (ts_node_is_null(node))
+        return {};
+
+    const uint32_t startByte = ts_node_start_byte(node);
+    const uint32_t endByte = ts_node_end_byte(node);
+    if (endByte <= startByte)
+        return {};
+
+    return QString::fromUtf8(sourceBytes.mid(startByte, endByte - startByte));
+}
+
+DocumentSymbolKind classifyDocumentSymbol(TSNode itemNode)
+{
+    const char* type = ts_node_type(itemNode);
+    if (!type)
+        return DocumentSymbolKind::Function;
+
+    if (strcmp(type, "preproc_def") == 0 || strcmp(type, "preproc_function_def") == 0)
+        return DocumentSymbolKind::Macro;
+    if (strcmp(type, "enumerator") == 0)
+        return DocumentSymbolKind::EnumConstant;
+    if (strcmp(type, "field_declaration") == 0)
+        return DocumentSymbolKind::Field;
+    if (strcmp(type, "type_definition") == 0
+        || strcmp(type, "struct_specifier") == 0
+        || strcmp(type, "union_specifier") == 0
+        || strcmp(type, "enum_specifier") == 0) {
+        return DocumentSymbolKind::Type;
+    }
+
+    return DocumentSymbolKind::Function;
+}
+
+QString displayTextForSymbol(const QByteArray& sourceBytes,
+                             TSNode itemNode,
+                             DocumentSymbolKind kind,
+                             const QString& name)
+{
+    const QString raw = normalizedNodeText(sourceBytes, itemNode);
+    const char* type = ts_node_type(itemNode);
+    if (!type)
+        return raw;
+
+    if (kind == DocumentSymbolKind::Function) {
+        if (strcmp(type, "function_definition") == 0) {
+            TSNode bodyNode = ts_node_child_by_field_name(itemNode, "body", 4);
+            if (!ts_node_is_null(bodyNode)) {
+                const uint32_t startByte = ts_node_start_byte(itemNode);
+                const uint32_t bodyByte = ts_node_start_byte(bodyNode);
+                if (bodyByte > startByte)
+                    return normalizedByteRangeText(sourceBytes, startByte, bodyByte);
+            }
+        }
+
+        QString display = raw;
+        display.remove(QRegularExpression(";\\s*$"));
+        return display;
+    }
+
+    if (kind == DocumentSymbolKind::Type) {
+        if (strcmp(type, "struct_specifier") == 0)
+            return QStringLiteral("struct %1").arg(name);
+        if (strcmp(type, "union_specifier") == 0)
+            return QStringLiteral("union %1").arg(name);
+        if (strcmp(type, "enum_specifier") == 0)
+            return QStringLiteral("enum %1").arg(name);
+
+        QString display = raw;
+        display.remove(QRegularExpression(";\\s*$"));
+        return display;
+    }
+
+    QString display = raw;
+    if (kind != DocumentSymbolKind::Macro)
+        display.remove(QRegularExpression(";\\s*$"));
+    return display;
+}
+
+bool captureNameEquals(TSQuery* query, uint32_t captureId, const char* expected)
+{
+    uint32_t length = 0;
+    const char* captureName = ts_query_capture_name_for_id(query, captureId, &length);
+    const size_t expectedLength = expected ? std::strlen(expected) : 0;
+    return captureName
+           && expected
+           && length == expectedLength
+           && std::strncmp(captureName, expected, length) == 0;
+}
+
+bool shouldReplaceSymbol(const DocumentSymbol& current, const DocumentSymbol& candidate)
+{
+    if (current.kind == DocumentSymbolKind::Function && candidate.kind == DocumentSymbolKind::Function) {
+        if (!current.isDefinition && candidate.isDefinition)
+            return true;
+        if (current.isDefinition == candidate.isDefinition
+            && candidate.displayText.size() > current.displayText.size()) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+} // namespace
 
 TreeSitterHelper::TreeSitterHelper(const QString &sourceCode)
 {
@@ -99,39 +245,18 @@ QString TreeSitterHelper::getNodeText(TSNode node) const
 QString TreeSitterHelper::extractFunctionSignature(TSNode funcNode) const
 {
     if (ts_node_is_null(funcNode))
-        return "";
+        return {};
 
     TSNode bodyNode = ts_node_child_by_field_name(funcNode, "body", 4);
     if (ts_node_is_null(bodyNode))
-        return getNodeText(funcNode);
+        return normalizedNodeText(m_sourceBytes, funcNode);
 
-    uint32_t startByte = ts_node_start_byte(funcNode);
-    uint32_t bodyByte  = ts_node_start_byte(bodyNode);
-
+    const uint32_t startByte = ts_node_start_byte(funcNode);
+    const uint32_t bodyByte  = ts_node_start_byte(bodyNode);
     if (bodyByte <= startByte)
-        return getNodeText(funcNode);
+        return normalizedNodeText(m_sourceBytes, funcNode);
 
-    QByteArray rawBytes = m_sourceBytes.mid(startByte, bodyByte - startByte);
-    QString cleaned = QString::fromUtf8(rawBytes);
-
-    // ------- REMOVE COMMENTS -------
-    cleaned.replace(QRegularExpression("/\\*.*?\\*/", QRegularExpression::DotMatchesEverythingOption), " ");
-    cleaned.replace(QRegularExpression("//[^\n]*"), "");
-
-    // ------- NORMALIZATION -------
-    cleaned.replace("\r\n", " ");
-    cleaned.replace("\n", " ");
-    cleaned.replace("\r", " ");
-
-    cleaned.replace(QRegularExpression("\\s+"), " "); // collapse whitespace
-    cleaned = cleaned.trimmed();
-
-    cleaned.replace(" (", "(");
-    cleaned.replace("( ", "(");
-    cleaned.replace(" )", ")");
-    cleaned.replace(") ", ")");
-
-    return cleaned;
+    return normalizedByteRangeText(m_sourceBytes, startByte, bodyByte);
 }
 
 // ============================================================================
@@ -211,6 +336,102 @@ std::vector<QString> getBreadcrumb(TSTree* tree, QPlainTextEdit* editor, const Q
 
     std::reverse(chain.begin(), chain.end());
     return chain;
+}
+
+QVector<DocumentSymbol> extractDocumentSymbols(TSTree* tree, const QString& sourceCode)
+{
+    QVector<DocumentSymbol> symbols;
+    if (!tree)
+        return symbols;
+
+    const TSLanguage* language = tree_sitter_c();
+    if (!language)
+        return symbols;
+
+    uint32_t errorOffset = 0;
+    TSQueryError errorType = TSQueryErrorNone;
+    TSQuery* query = ts_query_new(language,
+                                  OUTLINE_SCM,
+                                  std::strlen(OUTLINE_SCM),
+                                  &errorOffset,
+                                  &errorType);
+    if (!query) {
+        qWarning() << "extractDocumentSymbols: outline query creation failed"
+                   << errorType << "at" << errorOffset;
+        return symbols;
+    }
+
+    TSQueryCursor* cursor = ts_query_cursor_new();
+    if (!cursor) {
+        ts_query_delete(query);
+        return symbols;
+    }
+
+    const QByteArray sourceBytes = sourceCode.toUtf8();
+    const TSNode root = ts_tree_root_node(tree);
+    ts_query_cursor_exec(cursor, query, root);
+
+    QHash<QString, int> symbolIndexByKey;
+    TSQueryMatch match;
+    while (ts_query_cursor_next_match(cursor, &match)) {
+        TSNode itemNode {};
+        TSNode nameNode {};
+        bool hasItem = false;
+        bool hasName = false;
+
+        for (uint16_t i = 0; i < match.capture_count; ++i) {
+            const TSQueryCapture& capture = match.captures[i];
+            if (!hasItem && captureNameEquals(query, capture.index, "item")) {
+                itemNode = capture.node;
+                hasItem = true;
+                continue;
+            }
+            if (!hasName && captureNameEquals(query, capture.index, "name")) {
+                nameNode = capture.node;
+                hasName = true;
+            }
+        }
+
+        if (!hasItem || !hasName)
+            continue;
+
+        DocumentSymbol symbol;
+        symbol.name = nodeText(sourceBytes, nameNode).trimmed();
+        if (symbol.name.isEmpty())
+            continue;
+
+        symbol.kind = classifyDocumentSymbol(itemNode);
+        symbol.completionText = symbol.name;
+        symbol.displayText = displayTextForSymbol(sourceBytes, itemNode, symbol.kind, symbol.name);
+        symbol.line = static_cast<int>(ts_node_start_point(nameNode).row);
+        symbol.isDefinition = std::strcmp(ts_node_type(itemNode), "function_definition") == 0;
+
+        const QString key = QString::number(static_cast<int>(symbol.kind))
+                            + QLatin1Char(':')
+                            + symbol.name.toCaseFolded();
+        const auto existingIt = symbolIndexByKey.constFind(key);
+        if (existingIt != symbolIndexByKey.constEnd()) {
+            DocumentSymbol& current = symbols[existingIt.value()];
+            if (shouldReplaceSymbol(current, symbol))
+                current = symbol;
+            continue;
+        }
+
+        symbolIndexByKey.insert(key, symbols.size());
+        symbols.append(symbol);
+    }
+
+    std::sort(symbols.begin(), symbols.end(), [](const DocumentSymbol& lhs, const DocumentSymbol& rhs) {
+        if (lhs.line != rhs.line)
+            return lhs.line < rhs.line;
+        if (lhs.kind != rhs.kind)
+            return static_cast<int>(lhs.kind) < static_cast<int>(rhs.kind);
+        return lhs.name.compare(rhs.name, Qt::CaseInsensitive) < 0;
+    });
+
+    ts_query_cursor_delete(cursor);
+    ts_query_delete(query);
+    return symbols;
 }
 
 // ============================================================================

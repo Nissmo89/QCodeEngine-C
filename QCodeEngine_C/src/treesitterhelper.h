@@ -10,6 +10,23 @@
 // Declare the external C grammar function
 extern "C" const TSLanguage *tree_sitter_c();
 
+enum class DocumentSymbolKind {
+    Function,
+    Macro,
+    Type,
+    EnumConstant,
+    Field,
+};
+
+struct DocumentSymbol {
+    QString name;
+    QString completionText;
+    QString displayText;
+    DocumentSymbolKind kind = DocumentSymbolKind::Function;
+    int line = 0;
+    bool isDefinition = false;
+};
+
 struct FunctionRange {
     int startLine;
     int startCol;
@@ -64,6 +81,7 @@ private:
 int getCursorByteOffset(QPlainTextEdit* editor);
 TSNode getNodeAtCursor(TSTree* tree, QPlainTextEdit* editor);
 std::vector<QString> getBreadcrumb(TSTree* tree, QPlainTextEdit* editor, const QByteArray& sourceUtf8);
+QVector<DocumentSymbol> extractDocumentSymbols(TSTree* tree, const QString& sourceCode);
 
 int countFunctionDefinitions(const std::string &source);
 void traverseAndCount(TSNode node, int &count);
