@@ -15,6 +15,7 @@
 #include "CodeEditor/EditorTheme.h"
 
 #include <algorithm>
+#include <utility>
 
 #include <QApplication>
 #include <QKeyEvent>
@@ -58,7 +59,7 @@ CompletionPopup::CompletionPopup(QWidget* parent)
     connect(this, &QListWidget::itemClicked, this, [this](QListWidgetItem* item) {
         if (!item) return;
         m_selection = row(item);
-        emit completionAccepted(item->text());
+        emit completionAccepted(currentCompletion());
     });
 }
 
@@ -117,23 +118,29 @@ void CompletionPopup::showSuggestions(const QList<Entry>& all,
     }
 
     // Filter: startsWith(prefix, CaseInsensitive) and not exactly equal
-    m_visible.clear();
+    m_visibleEntries.clear();
     const QString lp = prefix.toLower();
     for (const Entry& e : all) {
         const QString lt = e.text.toLower();
         if (lt.startsWith(lp) && e.text != prefix)
-            m_visible.append(e.text);
+            m_visibleEntries.append(e);
     }
 
-    if (m_visible.isEmpty()) {
+    if (m_visibleEntries.isEmpty()) {
         hide();
         return;
     }
 
     // (Re)populate the QListWidget synchronously — CodeWizard's fillSuggestions()
     clear();
-    for (const QString& s : m_visible)
-        addItem(s);
+    int maxWidth = 220;
+    QFontMetrics fm(font());
+    for (const Entry& entry : std::as_const(m_visibleEntries)) {
+        const QString label = entry.detail.isEmpty() ? entry.text : entry.detail;
+        auto* item = new QListWidgetItem(label, this);
+        item->setData(Qt::UserRole, entry.text);
+        maxWidth = qMax(maxWidth, fm.horizontalAdvance(label) + 28);
+    }
 
     // Always reset to row 0 — the CodeWizard invariant
     m_selection = 0;
@@ -141,10 +148,9 @@ void CompletionPopup::showSuggestions(const QList<Entry>& all,
     update();
 
     // Size: clamp to 10 rows maximum (CodeWizard uses 10)
-    QFontMetrics fm(font());
     const int rowH  = fm.height() + 6;
-    const int rows  = qMin(m_visible.size(), 10);
-    const int boxW  = 300;
+    const int rows  = qMin(m_visibleEntries.size(), 10);
+    const int boxW  = qBound(220, maxWidth, 520);
     const int boxH  = rowH * rows + 8;
     resize(boxW, boxH);
 
@@ -177,17 +183,17 @@ void CompletionPopup::reposition(const QRect& cursorRect)
 
 void CompletionPopup::stepSelection(int delta)
 {
-    if (m_visible.isEmpty()) return;
-    m_selection = (m_selection + delta + m_visible.size()) % m_visible.size();
+    if (m_visibleEntries.isEmpty()) return;
+    m_selection = (m_selection + delta + m_visibleEntries.size()) % m_visibleEntries.size();
     setCurrentRow(m_selection);
     scrollToItem(item(m_selection));
 }
 
 QString CompletionPopup::currentCompletion() const
 {
-    if (m_visible.isEmpty()) return {};
-    if (m_selection < 0 || m_selection >= m_visible.size()) return m_visible.first();
-    return m_visible[m_selection];
+    if (m_visibleEntries.isEmpty()) return {};
+    if (m_selection < 0 || m_selection >= m_visibleEntries.size()) return m_visibleEntries.first().text;
+    return m_visibleEntries[m_selection].text;
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -204,6 +210,29 @@ static bool isReservedKeyword(const QString& w, const QStringList& kws) {
     for (const QString& k : kws)
         if (k.compare(w, Qt::CaseInsensitive) == 0) return true;
     return false;
+}
+
+static QString entryKey(const QString& text)
+{
+    return text.toCaseFolded();
+}
+
+static int symbolKindPriority(DocumentSymbolKind kind)
+{
+    switch (kind) {
+    case DocumentSymbolKind::Function:
+        return 0;
+    case DocumentSymbolKind::Type:
+        return 1;
+    case DocumentSymbolKind::Macro:
+        return 2;
+    case DocumentSymbolKind::EnumConstant:
+        return 3;
+    case DocumentSymbolKind::Field:
+        return 4;
+    }
+
+    return 5;
 }
 
 } // namespace
@@ -365,6 +394,12 @@ void AutoCompleter::addCustomKeyword(const QString& keyword)
     rebuildEntries();
 }
 
+void AutoCompleter::setDocumentSymbols(const QVector<DocumentSymbol>& symbols)
+{
+    m_documentSymbols = symbols;
+    rebuildEntries();
+}
+
 void AutoCompleter::setLargeDocumentMode(bool enabled)
 {
     if (m_largeDocumentMode == enabled)
@@ -374,6 +409,7 @@ void AutoCompleter::setLargeDocumentMode(bool enabled)
     m_rebuildTimer.stop();
 
     if (m_largeDocumentMode) {
+        m_documentSymbols.clear();
         m_wordLastIndex.clear();
         rebuildEntries();
         dismissPopup();
@@ -394,6 +430,30 @@ void AutoCompleter::rebuildEntries()
     m_entries.clear();
 
     using Kind = CompletionPopup::Kind;
+    QSet<QString> seenEntries;
+
+    QVector<DocumentSymbol> symbols = m_documentSymbols;
+    std::sort(symbols.begin(), symbols.end(), [](const DocumentSymbol& lhs, const DocumentSymbol& rhs) {
+        const int lhsPriority = symbolKindPriority(lhs.kind);
+        const int rhsPriority = symbolKindPriority(rhs.kind);
+        if (lhsPriority != rhsPriority)
+            return lhsPriority < rhsPriority;
+        if (lhs.name.compare(rhs.name, Qt::CaseInsensitive) != 0)
+            return lhs.name.compare(rhs.name, Qt::CaseInsensitive) < 0;
+        return lhs.line < rhs.line;
+    });
+
+    for (const DocumentSymbol& symbol : std::as_const(symbols)) {
+        const QString key = entryKey(symbol.completionText);
+        if (key.isEmpty() || seenEntries.contains(key))
+            continue;
+        seenEntries.insert(key);
+        m_entries.append({
+            symbol.completionText,
+            Kind::DocumentSymbol,
+            symbol.displayText
+        });
+    }
 
     if (!m_largeDocumentMode) {
         // 1) Document identifiers sorted by recency (most recently seen first)
@@ -404,6 +464,7 @@ void AutoCompleter::rebuildEntries()
         for (auto it = m_wordLastIndex.constBegin(); it != m_wordLastIndex.constEnd(); ++it) {
             const QString& w = it.key();
             if (w.size() < 2) continue;
+            if (seenEntries.contains(entryKey(w))) continue;
             if (isReservedKeyword(w, m_baseKeywords)) continue;
             bool customHit = false;
             for (const QString& c : m_customKeywords)
@@ -418,15 +479,18 @@ void AutoCompleter::rebuildEntries()
         });
 
         for (const DocEntry& e : docVec)
-            m_entries.append({e.text, Kind::DocumentWord});
+            m_entries.append({e.text, Kind::DocumentWord, {}});
     }
 
     // 2) C keywords, alphabetically
     QStringList kw = m_baseKeywords;
     std::sort(kw.begin(), kw.end(),
               [](const QString& a, const QString& b){ return a.compare(b, Qt::CaseInsensitive) < 0; });
-    for (const QString& k : kw)
-        m_entries.append({k, Kind::CKeyword});
+    for (const QString& k : kw) {
+        if (seenEntries.contains(entryKey(k)))
+            continue;
+        m_entries.append({k, Kind::CKeyword, {}});
+    }
 
     // 3) User keywords, alphabetically, no dupes with base
     QStringList ck = m_customKeywords;
@@ -436,7 +500,8 @@ void AutoCompleter::rebuildEntries()
         bool dup = false;
         for (const QString& b : m_baseKeywords)
             if (b.compare(k, Qt::CaseInsensitive) == 0) { dup = true; break; }
-        if (!dup) m_entries.append({k, Kind::UserKeyword});
+        if (!dup && !seenEntries.contains(entryKey(k)))
+            m_entries.append({k, Kind::UserKeyword, {}});
     }
 }
 

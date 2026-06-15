@@ -3,9 +3,11 @@
 #include <QColor>
 #include <QTimer>
 #include <QHash>
+#include <QSet>
 #include <QStringList>
 #include <QListWidget>
 #include <QPointer>
+#include "treesitterhelper.h"
 
 class QPlainTextEdit;
 class QKeyEvent;
@@ -21,11 +23,12 @@ struct QEditorTheme;
 class CompletionPopup : public QListWidget {
     Q_OBJECT
 public:
-    enum class Kind { DocumentWord = 0, CKeyword = 1, UserKeyword = 2 };
+    enum class Kind { DocumentSymbol = 0, DocumentWord = 1, CKeyword = 2, UserKeyword = 3 };
 
     struct Entry {
         QString text;
         Kind    kind;
+        QString detail;
     };
 
     explicit CompletionPopup(QWidget* parent = nullptr);
@@ -51,8 +54,7 @@ signals:
 private:
     void reposition(const QRect& cursorRect);
 
-    QList<Entry> m_allEntries;
-    QStringList  m_visible;    // filtered, parallel to list rows
+    QList<Entry> m_visibleEntries;
     int          m_selection = 0;
 };
 
@@ -68,6 +70,7 @@ public:
     void setEditor(QPlainTextEdit* editor);
     void setCustomKeywords(const QStringList& keywords);
     void addCustomKeyword(const QString& keyword);
+    void setDocumentSymbols(const QVector<DocumentSymbol>& symbols);
     void setPopupTheme(const QEditorTheme& theme);
     void setLargeDocumentMode(bool enabled);
 
@@ -97,6 +100,7 @@ private:
     // Word lists
     QStringList          m_baseKeywords;
     QStringList          m_customKeywords;
+    QVector<DocumentSymbol> m_documentSymbols;
     QHash<QString, int>  m_wordLastIndex;   // word → last char-position in doc
 
     QList<CompletionPopup::Entry> m_entries; // master sorted list
