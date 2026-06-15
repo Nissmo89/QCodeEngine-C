@@ -41,6 +41,7 @@ private slots:
     void enterKeepsEditingInsteadOfAcceptingSuggestion();
     void caretNavigationDismissesPopup();
     void backspaceReevaluatesPopupVisibility();
+    void treeSitterSymbolsDriveSuggestions();
 };
 
 void TestAutocompleteBehavior::enterKeepsEditingInsteadOfAcceptingSuggestion()
@@ -113,6 +114,37 @@ void TestAutocompleteBehavior::backspaceReevaluatesPopupVisibility()
 
     QVERIFY(!popup->isVisible());
     QCOMPARE(inner->toPlainText(), QString("r"));
+}
+
+void TestAutocompleteBehavior::treeSitterSymbolsDriveSuggestions()
+{
+    CodeEditor editor;
+    prepareEditor(editor);
+    QPlainTextEdit* inner = innerEditor(editor);
+    QVERIFY2(inner, "Inner editor widget not found");
+    QListWidget* popup = completionPopup(inner);
+    QVERIFY2(popup, "Completion popup not found");
+
+    editor.setText(
+        "static int compute_total(int value)\n"
+        "{\n"
+        "    return value + 1;\n"
+        "}\n\n");
+    QCoreApplication::processEvents();
+
+    inner->setFocus();
+    QCoreApplication::processEvents();
+
+    QTest::keyClicks(inner, "comp");
+    QTRY_VERIFY(popup->isVisible());
+    QVERIFY(popup->count() >= 1);
+    QCOMPARE(popup->item(0)->text(), QString("static int compute_total(int value)"));
+
+    QTest::keyClick(inner, Qt::Key_Tab);
+    QCoreApplication::processEvents();
+
+    QVERIFY(!popup->isVisible());
+    QVERIFY(inner->toPlainText().endsWith(QStringLiteral("compute_total")));
 }
 
 QTEST_MAIN(TestAutocompleteBehavior)

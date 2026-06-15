@@ -317,6 +317,16 @@ static int largeDocumentHighlightRadius(const QPlainTextEdit* editor)
     return qBound(160, radius, 420);
 }
 
+static QVector<DocumentSymbol> highlighterSymbols(TreeSitterHighlighter* highlighter)
+{
+    if (!highlighter)
+        return {};
+
+    return extractDocumentSymbols(
+        const_cast<TSTree*>(highlighter->syntaxTree()),
+        highlighter->sourceText());
+}
+
 struct FoldChipVisual {
     QString label;
     QRect rect;
@@ -1295,6 +1305,8 @@ void CodeEditorPrivate::setupEditorModules()
     // AutoCompleter
     m_completer = new AutoCompleter(this);
     m_completer->setEditor(m_editor);
+    if (!m_largeDocumentMode && m_highlighter)
+        m_completer->setDocumentSymbols(highlighterSymbols(m_highlighter));
 
     m_liveIndentController = new LiveIndentController(m_editor, m_highlighter);
     m_liveIndentController->setEnabled(m_autoIndent);
@@ -1482,6 +1494,9 @@ void CodeEditorPrivate::onTreeParsed(void* treePtr)
     m_lineHighlighter->updateFromTree(treePtr, m_editor->document());
 
     m_syntaxChecker->analyze(treePtr);
+
+    if (m_completer && m_highlighter)
+        m_completer->setDocumentSymbols(highlighterSymbols(m_highlighter));
 }
 
 void CodeEditorPrivate::updateActiveBracketGuide(bool forceRepaint)
@@ -1864,6 +1879,8 @@ void CodeEditorPrivate::applyDocumentPerformanceMode(qint64 sourceBytesHint)
             m_highlighter->setPerformanceMode(enabled);
         if (m_completer)
             m_completer->setLargeDocumentMode(enabled);
+        if (!enabled && m_completer && m_highlighter)
+            m_completer->setDocumentSymbols(highlighterSymbols(m_highlighter));
         if (m_searchBar)
             m_searchBar->setHighlightAllLimit(enabled ? 1500 : 0);
         return;
@@ -1875,6 +1892,8 @@ void CodeEditorPrivate::applyDocumentPerformanceMode(qint64 sourceBytesHint)
         m_highlighter->setPerformanceMode(enabled);
     if (m_completer)
         m_completer->setLargeDocumentMode(enabled);
+    if (!enabled && m_completer && m_highlighter)
+        m_completer->setDocumentSymbols(highlighterSymbols(m_highlighter));
     if (m_searchBar)
         m_searchBar->setHighlightAllLimit(enabled ? 1500 : 0);
 
@@ -1954,6 +1973,8 @@ void CodeEditorPrivate::resumeHeavyEditorFeatures()
         m_syntaxChecker->setDocument(m_editor->document());
     if (m_completer)
         m_completer->setLargeDocumentMode(m_largeDocumentMode);
+    if (m_completer && !m_largeDocumentMode && m_highlighter)
+        m_completer->setDocumentSymbols(highlighterSymbols(m_highlighter));
 
     if (m_foldingEnabled && m_gutter)
         m_gutter->setFoldingVisible(!m_largeDocumentMode);
@@ -2937,6 +2958,8 @@ void CodeEditor::setAutoCompleteEnabled(bool enabled) {
             d_ptr->m_completer->setEditor(d_ptr->m_editor);
             d_ptr->m_completer->setPopupTheme(d_ptr->m_theme);
             d_ptr->m_completer->setLargeDocumentMode(d_ptr->m_largeDocumentMode);
+            if (!d_ptr->m_largeDocumentMode && d_ptr->m_highlighter)
+                d_ptr->m_completer->setDocumentSymbols(highlighterSymbols(d_ptr->m_highlighter));
         }
     } else {
         if (d_ptr->m_completer) { d_ptr->m_completer->deleteLater(); d_ptr->m_completer = nullptr; }
