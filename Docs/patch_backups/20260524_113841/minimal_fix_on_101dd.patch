@@ -1,0 +1,608 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index af2d562..5a9605e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -8,6 +8,7 @@ set(CMAKE_AUTOUIC ON)
+ set(CMAKE_AUTORCC ON)
+ 
+ find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets)
++include(CTest)
+ 
+ add_subdirectory(QCodeEngine_C)
+ 
+diff --git a/QCodeEngine_C/include/CodeEditor/FindReplaceBar.h b/QCodeEngine_C/include/CodeEditor/FindReplaceBar.h
+index ccab8be..3ddfa07 100644
+--- a/QCodeEngine_C/include/CodeEditor/FindReplaceBar.h
++++ b/QCodeEngine_C/include/CodeEditor/FindReplaceBar.h
+@@ -18,6 +18,8 @@
+ #include <QRegularExpression>
+ #include <QTimer>
+ #include <QGraphicsOpacityEffect>
++#include <QScopedValueRollback>
++#include <QVector>
+ #include <functional>
+ #include <utility>
+ #include "CodeEditor/EditorTheme.h"
+@@ -226,7 +228,29 @@ public:
+     // ── Public API ─────────────────────────────────────────────────────────
+ 
+     void setEditor(QPlainTextEdit *editor) {
++        if (m_docChangeConnection)
++            QObject::disconnect(m_docChangeConnection);
++
+         m_editor = editor;
++        if (!m_editor || !m_editor->document())
++            return;
++
++        m_docChangeConnection = connect(m_editor->document(), &QTextDocument::contentsChanged,
++                                        this, [this]() {
++            if (m_replaceInProgress)
++                return;
++
++            if (!isVisible() || m_findEdit->text().isEmpty()) {
++                clearHighlights();
++                updateMatchLabel();
++                return;
++            }
++
++            // Drop stale match cursors immediately after any mutation so repaints
++            // never run with pre-edit selections while debounce is pending.
++            clearHighlightSelectionsOnly();
++            m_searchTimer->start();
++        });
+     }
+ 
+     void setTheme(const QEditorTheme &theme) {
+@@ -385,10 +409,22 @@ private slots:
+         m_highlightsTruncated = false;
+         int count = 0, currentIndex = 0;
+         QTextCursor editorCursor = m_editor->textCursor();
++        int guardPos = -1;
+ 
+         while (true) {
+             cur = findIn(doc, needle, cur, flags);
+             if (cur.isNull()) break;
++            const int matchStart = cur.selectionStart();
++            const int matchEnd = cur.selectionEnd();
++            if (matchEnd <= matchStart) {
++                const int nextPos = qMin(matchStart + 1, qMax(0, doc->characterCount() - 1));
++                if (nextPos <= guardPos)
++                    break;
++                guardPos = nextPos;
++                cur.setPosition(nextPos);
++                continue;
++            }
++            guardPos = matchEnd;
+             ++count;
+ 
+             if (m_maxHighlights > 0 && highlights.size() >= m_maxHighlights) {
+@@ -468,6 +504,8 @@ private slots:
+         const QString needle  = m_findEdit->text();
+         const QString replace = m_replaceEdit->text();
+         if (needle.isEmpty()) return;
++        clearHighlightSelectionsOnly();
++        QScopedValueRollback<bool> replaceGuard(m_replaceInProgress, true);
+ 
+         QTextCursor cur = m_editor->textCursor();
+ 
+@@ -478,7 +516,10 @@ private slots:
+ 
+             if (m_btnRegex->isActive()) {
+                 QRegularExpression re = buildRegex(needle);
+-                matches = re.match(sel).hasMatch();
++                QRegularExpressionMatch m = re.match(sel);
++                matches = m.hasMatch()
++                          && m.capturedStart() == 0
++                          && m.capturedLength() == sel.size();
+             } else {
+                 Qt::CaseSensitivity cs = m_btnCase->isActive()
+                 ? Qt::CaseSensitive
+@@ -501,24 +542,93 @@ private slots:
+         const QString needle  = m_findEdit->text();
+         const QString replace = m_replaceEdit->text();
+         if (needle.isEmpty()) return;
++        clearHighlightSelectionsOnly();
++        QScopedValueRollback<bool> replaceGuard(m_replaceInProgress, true);
+ 
+         QTextDocument *doc = m_editor->document();
+-        QTextCursor    cur(doc);
+         QTextDocument::FindFlags flags = buildFindFlags(false);
+ 
+-        int count = 0;
+-        cur.beginEditBlock();
++        struct ReplaceSpan {
++            int start = 0;
++            int end = 0;
++            QString replacement;
++        };
++
++        QVector<ReplaceSpan> spans;
++        QTextCursor scan(doc);
++        const int scanMaxPos = qMax(0, doc->characterCount() - 1);
++        int guardPos = -1;
+         while (true) {
+-            cur = findIn(doc, needle, cur, flags);
+-            if (cur.isNull()) break;
+-            ++count;
+-            cur.insertText(buildReplacement(needle, replace, cur));
++            scan = findIn(doc, needle, scan, flags);
++            if (scan.isNull())
++                break;
++
++            const int matchStart = scan.selectionStart();
++            const int matchEnd = scan.selectionEnd();
++            if (matchEnd <= matchStart) {
++                const int nextPos = qMin(matchStart + 1, scanMaxPos);
++                if (nextPos <= guardPos)
++                    break;
++                guardPos = nextPos;
++                scan.setPosition(nextPos);
++                continue;
++            }
++
++            spans.append({matchStart, matchEnd, buildReplacement(needle, replace, scan)});
++            guardPos = matchEnd;
++            scan.setPosition(matchEnd);
++        }
++
++        if (spans.isEmpty()) {
++            m_matchLabel->setText("No matches");
++            doHighlightAll();
++            return;
+         }
+-        cur.endEditBlock();
+ 
+-        m_matchLabel->setText(count > 0
+-                                  ? QString("%1 replaced").arg(count)
+-                                  : "No matches");
++        const QString source = doc->toPlainText();
++        QString replacedText;
++        replacedText.reserve(source.size());
++
++        int sourcePos = 0;
++        int appliedCount = 0;
++        ReplaceSpan firstApplied;
++        bool haveFirstApplied = false;
++        for (const ReplaceSpan& span : spans) {
++            if (span.start < sourcePos || span.end < span.start || span.end > source.size())
++                continue;
++            replacedText += source.mid(sourcePos, span.start - sourcePos);
++            replacedText += span.replacement;
++            sourcePos = span.end;
++            if (!haveFirstApplied) {
++                firstApplied = span;
++                haveFirstApplied = true;
++            }
++            ++appliedCount;
++        }
++        replacedText += source.mid(sourcePos);
++
++        if (appliedCount == 0) {
++            m_matchLabel->setText("No matches");
++            doHighlightAll();
++            return;
++        }
++
++        QTextCursor writer(doc);
++        writer.beginEditBlock();
++        writer.select(QTextCursor::Document);
++        writer.insertText(replacedText);
++        writer.endEditBlock();
++
++        const ReplaceSpan first = firstApplied;
++        const int maxPos = qMax(0, doc->characterCount() - 1);
++        const int selStart = qBound(0, first.start, maxPos);
++        const int selEnd = qBound(selStart, first.start + first.replacement.size(), maxPos);
++        QTextCursor selection(doc);
++        selection.setPosition(selStart);
++        selection.setPosition(selEnd, QTextCursor::KeepAnchor);
++        m_editor->setTextCursor(selection);
++
++        m_matchLabel->setText(QString("%1 replaced").arg(appliedCount));
+ 
+         doHighlightAll();
+     }
+@@ -733,14 +843,18 @@ private:
+     }
+ 
+     void clearHighlights() {
+-        if (m_highlightsHandler)
+-            m_highlightsHandler({});
+-        m_savedHighlights.clear();
++        clearHighlightSelectionsOnly();
+         m_totalMatches = 0;
+         m_currentMatch = 0;
+         m_highlightsTruncated = false;
+     }
+ 
++    void clearHighlightSelectionsOnly() {
++        if (m_highlightsHandler)
++            m_highlightsHandler({});
++        m_savedHighlights.clear();
++    }
++
+     void updateMatchLabel() {
+         if (m_totalMatches == 0)
+             m_matchLabel->setText(m_findEdit->text().isEmpty() ? "" : "No results");
+@@ -852,6 +966,8 @@ private:
+     int m_maxHighlights = 0;
+     bool m_highlightsTruncated = false;
+     std::function<void(const QList<QTextEdit::ExtraSelection>&)> m_highlightsHandler;
++    QMetaObject::Connection m_docChangeConnection;
++    bool m_replaceInProgress = false;
+ };
+ 
+ #endif // FINDREPLACEBAR_H
+diff --git a/QCodeEngine_C/src/CodeEditor.cpp b/QCodeEngine_C/src/CodeEditor.cpp
+index a973cd2..2e4cd86 100644
+--- a/QCodeEngine_C/src/CodeEditor.cpp
++++ b/QCodeEngine_C/src/CodeEditor.cpp
+@@ -1753,6 +1753,31 @@ void CodeEditorPrivate::setFoldingEnabled(bool enabled)
+ }
+ 
+ void CodeEditorPrivate::updateCurrentLineHighlight() {
++    auto sanitizeSelections = [this](const QList<QTextEdit::ExtraSelection>& in) {
++        QList<QTextEdit::ExtraSelection> out;
++        if (!m_editor || !m_editor->document() || in.isEmpty())
++            return out;
++
++        QTextDocument* doc = m_editor->document();
++        const int maxPos = qMax(0, doc->characterCount() - 1);
++        out.reserve(in.size());
++        for (const QTextEdit::ExtraSelection& sel : in) {
++            const QTextCursor cursor = sel.cursor;
++            if (cursor.isNull() || cursor.document() != doc)
++                continue;
++
++            QTextEdit::ExtraSelection normalized = sel;
++            QTextCursor safe(doc);
++            const int anchor = qBound(0, cursor.anchor(), maxPos);
++            const int pos = qBound(0, cursor.position(), maxPos);
++            safe.setPosition(anchor);
++            safe.setPosition(pos, QTextCursor::KeepAnchor);
++            normalized.cursor = safe;
++            out.append(normalized);
++        }
++        return out;
++    };
++
+     QList<QTextEdit::ExtraSelection> extras;
+     if (!m_editor->isReadOnly()) {
+         QTextEdit::ExtraSelection sel;
+@@ -1768,7 +1793,7 @@ void CodeEditorPrivate::updateCurrentLineHighlight() {
+     extras.append(multiCursorSelections());
+     extras.append(m_bracketSelections);
+     extras.append(m_searchSelections);
+-    m_editor->setExtraSelections(extras);
++    m_editor->setExtraSelections(sanitizeSelections(extras));
+ }
+ 
+ void CodeEditorPrivate::updateBracketMatch() {
+@@ -1991,6 +2016,14 @@ void CodeEditorPrivate::onTextChanged()
+         normalizeExtraCursors();
+         updateCurrentLineHighlight();
+     }
++
++    // Search highlights from API-driven find operations are static snapshots.
++    // Drop them after edits when the interactive search bar is not visible.
++    if (!m_searchSelections.isEmpty() && (!m_searchBar || !m_searchBar->isVisible())) {
++        m_searchSelections.clear();
++        updateCurrentLineHighlight();
++    }
++
+     if (!m_largeFileMode && !m_asyncLoadInProgress) {
+         const qint64 approxBytes = static_cast<qint64>(m_editor->document()->characterCount()) * 2;
+         if (m_largeDocumentMode != shouldUseLargeDocumentMode(approxBytes))
+@@ -2469,24 +2502,72 @@ void CodeEditor::replaceAll(const QString& term, const QString& replacement) {
+     const bool caseSensitive = reuseLastOptions ? d_ptr->m_lastSearchCaseSensitive : false;
+     const bool regex = reuseLastOptions ? d_ptr->m_lastSearchRegex : false;
+ 
+-    QTextCursor cur(d_ptr->m_editor->document());
++    QTextDocument* doc = d_ptr->m_editor->document();
++    if (!doc || term.isEmpty()) {
++        findNext(term, caseSensitive, regex);
++        return;
++    }
++
+     QTextDocument::FindFlags flags;
+     if (caseSensitive)
+         flags |= QTextDocument::FindCaseSensitively;
+     const QRegularExpression re = buildSearchRegex(term, caseSensitive);
+ 
+-    cur.beginEditBlock();
++    struct ReplaceSpan {
++        int start = 0;
++        int end = 0;
++        QString replacement;
++    };
++
++    QVector<ReplaceSpan> spans;
++    QTextCursor cur(doc);
++    const int scanMaxPos = qMax(0, doc->characterCount() - 1);
++    int guardPos = -1;
+     while (true) {
+-        cur = regex ? d_ptr->m_editor->document()->find(re, cur)
+-                    : d_ptr->m_editor->document()->find(term, cur, flags);
++        cur = regex ? doc->find(re, cur)
++                    : doc->find(term, cur, flags);
+         if (cur.isNull())
+             break;
+ 
+-        const QString selectedText = cur.selectedText();
+-        cur.insertText(buildReplacementText(
+-            selectedText, term, replacement, caseSensitive, regex));
++        const int matchStart = cur.selectionStart();
++        const int matchEnd = cur.selectionEnd();
++        if (matchEnd <= matchStart) {
++            const int nextPos = qMin(matchStart + 1, scanMaxPos);
++            if (nextPos <= guardPos)
++                break;
++            guardPos = nextPos;
++            cur.setPosition(nextPos);
++            continue;
++        }
++
++        spans.append({matchStart, matchEnd,
++                      buildReplacementText(cur.selectedText(), term, replacement, caseSensitive, regex)});
++        guardPos = matchEnd;
++        cur.setPosition(matchEnd);
+     }
+-    cur.endEditBlock();
++
++    if (!spans.isEmpty()) {
++        const QString source = doc->toPlainText();
++        QString replacedText;
++        replacedText.reserve(source.size());
++
++        int sourcePos = 0;
++        for (const ReplaceSpan& span : spans) {
++            if (span.start < sourcePos || span.end < span.start || span.end > source.size())
++                continue;
++            replacedText += source.mid(sourcePos, span.start - sourcePos);
++            replacedText += span.replacement;
++            sourcePos = span.end;
++        }
++        replacedText += source.mid(sourcePos);
++
++        QTextCursor writer(doc);
++        writer.beginEditBlock();
++        writer.select(QTextCursor::Document);
++        writer.insertText(replacedText);
++        writer.endEditBlock();
++    }
++
+     findNext(term, caseSensitive, regex);
+ }
+ 
+diff --git a/QCodeEngine_C/tests/CMakeLists.txt b/QCodeEngine_C/tests/CMakeLists.txt
+index 94a2f2d..c2ffb91 100644
+--- a/QCodeEngine_C/tests/CMakeLists.txt
++++ b/QCodeEngine_C/tests/CMakeLists.txt
+@@ -2,15 +2,12 @@ find_package(Qt6 REQUIRED COMPONENTS Test Widgets)
+ enable_testing()
+ 
+ function(add_editor_test name)
+-    # Stub for now
+-    # add_executable(${name} ${name}.cpp)
+-    # target_link_libraries(${name} QCodeEditor Qt6::Test Qt6::Widgets)
+-    # add_test(NAME ${name} COMMAND ${name})
++    add_executable(${name} ${name}.cpp)
++    target_link_libraries(${name} PRIVATE QCodeEngine_C Qt6::Test Qt6::Widgets)
++    add_test(NAME ${name} COMMAND ${name})
++    set_tests_properties(${name} PROPERTIES
++        ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
++    )
+ endfunction()
+ 
+-# add_editor_test(test_highlighting)
+-# add_editor_test(test_folding)
+-# add_editor_test(test_autocomplete)
+-# add_editor_test(test_theming)
+-# add_editor_test(test_search)
+-# add_editor_test(test_performance)
++add_editor_test(test_findreplace_crash)
+diff --git a/QCodeEngine_C/tests/test_findreplace_crash.cpp b/QCodeEngine_C/tests/test_findreplace_crash.cpp
+new file mode 100644
+index 0000000..80fe978
+--- /dev/null
++++ b/QCodeEngine_C/tests/test_findreplace_crash.cpp
+@@ -0,0 +1,199 @@
++#include <QtTest>
++#include <QLineEdit>
++#include <QPlainTextEdit>
++
++#include "CodeEditor/CodeEditor.h"
++#include "CodeEditor/FindReplaceBar.h"
++
++namespace {
++
++QLineEdit* lineEditByPlaceholder(FindReplaceBar* bar, const QString& placeholder)
++{
++    const auto edits = bar->findChildren<QLineEdit*>();
++    for (QLineEdit* edit : edits) {
++        if (edit && edit->placeholderText() == placeholder)
++            return edit;
++    }
++    return nullptr;
++}
++
++} // namespace
++
++class TestFindReplaceCrash : public QObject
++{
++    Q_OBJECT
++
++private slots:
++    void replaceAllThenReplaceThenEditDoesNotCrash();
++    void repeatedReplaceAndManualEditDoesNotCrash();
++    void replaceSingleCharWithLongerTokenDoesNotCrash();
++};
++
++void TestFindReplaceCrash::replaceAllThenReplaceThenEditDoesNotCrash()
++{
++    CodeEditor editor;
++    editor.resize(900, 640);
++    editor.show();
++    QCoreApplication::processEvents();
++
++    editor.setText(
++        "hello hello hello\n"
++        "hello world\n"
++        "hello again\n");
++    QCoreApplication::processEvents();
++
++    editor.showSearchBar();
++    FindReplaceBar* bar = editor.findChild<FindReplaceBar*>();
++    QVERIFY2(bar, "FindReplaceBar was not created");
++
++    bar->openFindReplace();
++    QCoreApplication::processEvents();
++
++    QLineEdit* findEdit = lineEditByPlaceholder(bar, "Find");
++    QLineEdit* replaceEdit = lineEditByPlaceholder(bar, "Replace");
++    QVERIFY2(findEdit, "Could not find search input");
++    QVERIFY2(replaceEdit, "Could not find replace input");
++
++    findEdit->setText("hello");
++    replaceEdit->setText("test");
++    QTest::qWait(120); // Let highlight debounce complete
++
++    QVERIFY(QMetaObject::invokeMethod(bar, "doReplaceAll", Qt::DirectConnection));
++    QCoreApplication::processEvents();
++
++    findEdit->setText("test");
++    replaceEdit->setText("done");
++    QTest::qWait(120);
++
++    QVERIFY(QMetaObject::invokeMethod(bar, "findNext", Qt::DirectConnection));
++    QVERIFY(QMetaObject::invokeMethod(bar, "doReplace", Qt::DirectConnection));
++    QCoreApplication::processEvents();
++
++    QPlainTextEdit* innerEditor = editor.findChild<QPlainTextEdit*>();
++    QVERIFY2(innerEditor, "Inner editor widget not found");
++
++    QTextCursor cursor = innerEditor->textCursor();
++    const int donePos = innerEditor->toPlainText().indexOf("done");
++    QVERIFY2(donePos >= 0, "Expected a single replaced token before manual edit");
++    cursor.setPosition(donePos + 1);
++    innerEditor->setTextCursor(cursor);
++    QCoreApplication::processEvents();
++
++    QTest::keyClicks(innerEditor, "X");
++    QCoreApplication::processEvents();
++    QTest::qWait(120);
++
++    QVERIFY(innerEditor->toPlainText().contains("dXone"));
++}
++
++void TestFindReplaceCrash::repeatedReplaceAndManualEditDoesNotCrash()
++{
++    CodeEditor editor;
++    editor.resize(900, 640);
++    editor.show();
++    QCoreApplication::processEvents();
++
++    editor.setText(
++        "hello hello hello\n"
++        "hello world\n"
++        "hello again\n"
++        "hello tail\n");
++    QCoreApplication::processEvents();
++
++    editor.showSearchBar();
++    FindReplaceBar* bar = editor.findChild<FindReplaceBar*>();
++    QVERIFY2(bar, "FindReplaceBar was not created");
++    bar->openFindReplace();
++    QCoreApplication::processEvents();
++
++    QLineEdit* findEdit = lineEditByPlaceholder(bar, "Find");
++    QLineEdit* replaceEdit = lineEditByPlaceholder(bar, "Replace");
++    QVERIFY2(findEdit, "Could not find search input");
++    QVERIFY2(replaceEdit, "Could not find replace input");
++
++    QPlainTextEdit* innerEditor = editor.findChild<QPlainTextEdit*>();
++    QVERIFY2(innerEditor, "Inner editor widget not found");
++
++    for (int i = 0; i < 8; ++i) {
++        findEdit->setText("hello");
++        replaceEdit->setText("test");
++        QTest::qWait(100);
++        QVERIFY(QMetaObject::invokeMethod(bar, "doReplaceAll", Qt::DirectConnection));
++        QCoreApplication::processEvents();
++
++        findEdit->setText("test");
++        replaceEdit->setText("hello");
++        QTest::qWait(100);
++        QVERIFY(QMetaObject::invokeMethod(bar, "findNext", Qt::DirectConnection));
++        QVERIFY(QMetaObject::invokeMethod(bar, "doReplace", Qt::DirectConnection));
++        QCoreApplication::processEvents();
++
++        QTextCursor cursor = innerEditor->textCursor();
++        const QString text = innerEditor->toPlainText();
++        const int testPos = text.indexOf("test");
++        QVERIFY2(testPos >= 0, "Expected token 'test' to remain in document");
++        cursor.setPosition(testPos);
++        innerEditor->setTextCursor(cursor);
++        QCoreApplication::processEvents();
++
++        QTest::keyClicks(innerEditor, "Z");
++        QCoreApplication::processEvents();
++        QTest::qWait(40);
++    }
++
++    QVERIFY(!innerEditor->toPlainText().isEmpty());
++}
++
++void TestFindReplaceCrash::replaceSingleCharWithLongerTokenDoesNotCrash()
++{
++    CodeEditor editor;
++    editor.resize(900, 640);
++    editor.show();
++    QCoreApplication::processEvents();
++
++    editor.setText(
++        "x x x x\n"
++        "x y x y\n"
++        "tail x\n");
++    QCoreApplication::processEvents();
++
++    editor.showSearchBar();
++    FindReplaceBar* bar = editor.findChild<FindReplaceBar*>();
++    QVERIFY2(bar, "FindReplaceBar was not created");
++    bar->openFindReplace();
++    QCoreApplication::processEvents();
++
++    QLineEdit* findEdit = lineEditByPlaceholder(bar, "Find");
++    QLineEdit* replaceEdit = lineEditByPlaceholder(bar, "Replace");
++    QVERIFY2(findEdit, "Could not find search input");
++    QVERIFY2(replaceEdit, "Could not find replace input");
++
++    QPlainTextEdit* innerEditor = editor.findChild<QPlainTextEdit*>();
++    QVERIFY2(innerEditor, "Inner editor widget not found");
++
++    findEdit->setText("x");
++    replaceEdit->setText("xyz");
++    QTest::qWait(120);
++    QVERIFY(QMetaObject::invokeMethod(bar, "doReplaceAll", Qt::DirectConnection));
++    QCoreApplication::processEvents();
++
++    const QString expanded = innerEditor->toPlainText();
++    QVERIFY2(expanded.contains("xyz"), "Expected expanded replacement text");
++
++    // Force cursor movement + edit immediately after expansion to stress paint/layout.
++    const int pivot = expanded.indexOf("xyz");
++    QVERIFY2(pivot >= 0, "Expected to find expanded token");
++    QTextCursor cursor = innerEditor->textCursor();
++    cursor.setPosition(pivot + 1);
++    innerEditor->setTextCursor(cursor);
++    QCoreApplication::processEvents();
++
++    QTest::keyClicks(innerEditor, "Q");
++    QCoreApplication::processEvents();
++    QTest::qWait(120);
++
++    QVERIFY(innerEditor->toPlainText().contains("xQyz"));
++}
++
++QTEST_MAIN(TestFindReplaceCrash)
++#include "test_findreplace_crash.moc"

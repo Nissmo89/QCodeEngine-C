@@ -84,6 +84,17 @@ QString displayTextForSymbol(const QByteArray& sourceBytes,
                              DocumentSymbolKind kind,
                              const QString& name)
 {
+    if (kind == DocumentSymbolKind::Macro) {
+        QString text = nodeText(sourceBytes, itemNode);
+        text.replace(QRegularExpression("/\\*.*?\\*/", QRegularExpression::DotMatchesEverythingOption), " ");
+        text.replace(QRegularExpression("//[^\\n]*"), "");
+        text.replace("\r\n", " ");
+        text.replace("\n", " ");
+        text.replace("\r", " ");
+        text.replace(QRegularExpression("\\s+"), " ");
+        return text.trimmed();
+    }
+
     const QString raw = normalizedNodeText(sourceBytes, itemNode);
     const char* type = ts_node_type(itemNode);
     if (!type)

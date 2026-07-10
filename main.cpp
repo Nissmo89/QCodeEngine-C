@@ -12,6 +12,7 @@
 #include <QDir>
 #include <CodeEditor/CodeEditor.h>
 #include <CodeEditor/EditorTheme.h>
+#include <CodeEditor/PerformanceMonitorWindow.h>
 
 namespace {
 
@@ -185,6 +186,10 @@ int main(int argc, char* argv[]) {
     });
 
     mainWindow.show();
+
+    PerformanceMonitorWindow* perfWindow = new PerformanceMonitorWindow();
+    perfWindow->setGeometry(mainWindow.x() + mainWindow.width() + 10, mainWindow.y(), 900, 650);
+    perfWindow->show();
 
     return app.exec();
 }

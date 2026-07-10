@@ -2,8 +2,10 @@
 #include "CodeEditor/diagnosticmanager.h"
 #include "CodeEditor_p.h"
 #include "EditorMetrics.h"
+#include "CodeEditor/EditorTelemetry.h"
 #include <QHBoxLayout>
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -707,38 +709,69 @@ InnerEditor::InnerEditor(CodeEditorPrivate* d, QWidget* parent)
 }
 
 void InnerEditor::keyPressEvent(QKeyEvent* e) {
-    if (d_ptr->dispatchPluginKeyPress(e)) return;
-    if (d_ptr->handleMultiCursorEdit(e)) return;
-    if (d_ptr->m_completer && d_ptr->m_completer->handleKeyPress(e)) return;
-    if (d_ptr->handleKeyPress(e)) return;
-    QPlainTextEdit::keyPressEvent(e);
+    QElapsedTimer timer;
+    timer.start();
 
-    if (!d_ptr->m_completer)
-        return;
-
-    switch (e->key()) {
-    case Qt::Key_Backspace:
-    case Qt::Key_Delete:
-        d_ptr->m_completer->updatePopup();
-        return;
-
-    case Qt::Key_Left:
-    case Qt::Key_Right:
-    case Qt::Key_Up:
-    case Qt::Key_Down:
-    case Qt::Key_Home:
-    case Qt::Key_End:
-    case Qt::Key_PageUp:
-    case Qt::Key_PageDown:
-        d_ptr->m_completer->dismissPopup();
-        return;
-
-    default:
-        break;
+    QString keyText = e->text();
+    if (keyText.isEmpty() || keyText == QLatin1String("\r") || keyText == QLatin1String("\n")) {
+        switch (e->key()) {
+            case Qt::Key_Return: case Qt::Key_Enter: keyText = QStringLiteral("Enter"); break;
+            case Qt::Key_Backspace: keyText = QStringLiteral("Backspace"); break;
+            case Qt::Key_Delete: keyText = QStringLiteral("Delete"); break;
+            case Qt::Key_Tab: keyText = QStringLiteral("Tab"); break;
+            case Qt::Key_Escape: keyText = QStringLiteral("Escape"); break;
+            case Qt::Key_Space: keyText = QStringLiteral("Space"); break;
+            default: keyText = QStringLiteral("Key_%1").arg(e->key()); break;
+        }
     }
 
-    if (!e->text().isEmpty())
-        d_ptr->m_completer->updatePopup();
+    if (d_ptr->dispatchPluginKeyPress(e)) {
+        double elapsed = timer.nsecsElapsed() / 1000000.0;
+        EditorTelemetry::instance()->recordOperation(QStringLiteral("Key Press (Plugin)"), keyText, elapsed);
+        return;
+    }
+    if (d_ptr->handleMultiCursorEdit(e)) {
+        double elapsed = timer.nsecsElapsed() / 1000000.0;
+        EditorTelemetry::instance()->recordOperation(QStringLiteral("Key Press (MultiCursor)"), keyText, elapsed);
+        return;
+    }
+    if (d_ptr->m_completer && d_ptr->m_completer->handleKeyPress(e)) {
+        double elapsed = timer.nsecsElapsed() / 1000000.0;
+        EditorTelemetry::instance()->recordOperation(QStringLiteral("Key Press (Completer)"), keyText, elapsed);
+        return;
+    }
+    if (d_ptr->handleKeyPress(e)) {
+        double elapsed = timer.nsecsElapsed() / 1000000.0;
+        EditorTelemetry::instance()->recordOperation(QStringLiteral("Key Press (Editor)"), keyText, elapsed);
+        return;
+    }
+    QPlainTextEdit::keyPressEvent(e);
+
+    if (d_ptr->m_completer) {
+        switch (e->key()) {
+        case Qt::Key_Backspace:
+        case Qt::Key_Delete:
+            d_ptr->m_completer->updatePopup();
+            break;
+        case Qt::Key_Left:
+        case Qt::Key_Right:
+        case Qt::Key_Up:
+        case Qt::Key_Down:
+        case Qt::Key_Home:
+        case Qt::Key_End:
+        case Qt::Key_PageUp:
+        case Qt::Key_PageDown:
+            d_ptr->m_completer->dismissPopup();
+            break;
+        default:
+            if (!e->text().isEmpty())
+                d_ptr->m_completer->updatePopup();
+            break;
+        }
+    }
+
+    double elapsed = timer.nsecsElapsed() / 1000000.0;
+    EditorTelemetry::instance()->recordOperation(QStringLiteral("Key Press (Typing)"), keyText, elapsed);
 }
 
 bool InnerEditor::foldedChipAt(const QPoint& pos, int* foldStart, QRect* chipRect, int* hiddenLines) const
@@ -875,6 +908,9 @@ void InnerEditor::leaveEvent(QEvent* e)
 }
 
 void InnerEditor::paintEvent(QPaintEvent* e) {
+    QElapsedTimer paintTimer;
+    paintTimer.start();
+
     // ── Preserve syntax colors under selection ────────────────────────────────
     //
     // Qt's QTextDocumentLayout replaces every character's foreground with
@@ -1213,6 +1249,9 @@ void InnerEditor::paintEvent(QPaintEvent* e) {
 
         painter.restore();
     }
+
+    double elapsedMs = paintTimer.nsecsElapsed() / 1000000.0;
+    EditorTelemetry::instance()->recordPaint(paintTimer.nsecsElapsed(), elapsedMs);
 }
 
 // ── CodeEditorPrivate constructor ─────────────────────────────────────────────
@@ -1237,12 +1276,24 @@ CodeEditorPrivate::CodeEditorPrivate(CodeEditor* q, QWidget* parent)
         m_gutter->update();
         syncMiniMapVisibility();
     });
+    EditorTelemetry::instance()->registerEditor(q_ptr);
 }
 
 CodeEditorPrivate::~CodeEditorPrivate()
 {
+    cancelLazyFileLoad();
+    cancelAsyncFileLoad();
+    exitLargeFileMode();
+
+    EditorTelemetry::instance()->unregisterEditor(q_ptr);
     delete m_liveIndentController;
     m_liveIndentController = nullptr;
+    delete m_largeFileState;
+    m_largeFileState = nullptr;
+    if (m_lazyBackgroundTimer) {
+        delete m_lazyBackgroundTimer;
+        m_lazyBackgroundTimer = nullptr;
+    }
 }
 
 // ── Layout ────────────────────────────────────────────────────────────────────
@@ -1980,9 +2031,9 @@ void CodeEditorPrivate::resumeHeavyEditorFeatures()
         m_gutter->setFoldingVisible(!m_largeDocumentMode);
     syncMiniMapVisibility();
 }
-
 void CodeEditorPrivate::cancelAsyncFileLoad()
 {
+    cancelLazyFileLoad();
     ++m_asyncLoadGeneration;
     m_asyncLoadInProgress = false;
     m_asyncLoadedText.clear();
@@ -1998,6 +2049,172 @@ void CodeEditorPrivate::cancelAsyncFileLoad()
         m_asyncLoadThread = nullptr;
     }
     syncMiniMapVisibility();
+}
+
+bool CodeEditorPrivate::startLazyFileLoad(const QString& filePath)
+{
+    cancelAsyncFileLoad();
+    cancelLazyFileLoad();
+    exitLargeFileMode();
+
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly))
+        return false;
+
+    const qint64 fileSize = file.size();
+    
+    // Read the first chunk (e.g. 2MB)
+    const qint64 firstChunkSize = qMin<qint64>(fileSize, 2LL * 1024 * 1024);
+    const QByteArray bytes = file.read(firstChunkSize);
+    QString firstChunkText = QString::fromUtf8(bytes);
+    file.close();
+
+    const int generation = ++m_lazyLoadGeneration;
+    m_lazyLoadActive = true;
+    m_lazyFilePath = filePath;
+    m_lazyLoadedBytes = bytes.size();
+    m_lazyTotalBytes = fileSize;
+    m_lazyLoadingChunk = false;
+    m_loadedFilePath = filePath;
+    m_loadedFileSize = fileSize;
+    m_savedReadOnly = m_editor->isReadOnly();
+    m_multiCursors.clear();
+
+    suspendHeavyEditorFeatures();
+    m_editor->setUndoRedoEnabled(false);
+    m_editor->setReadOnly(true); // read-only while loading dynamically
+    m_editor->setPlainText(firstChunkText);
+    applyEditorStyle(m_editor);
+    m_gutter->updateWidth();
+    m_gutter->update();
+    syncMiniMapVisibility();
+
+    EditorTelemetry::instance()->startLoadFile(filePath);
+
+    // Set up the background timer to load subsequent chunks progressively
+    if (!m_lazyBackgroundTimer) {
+        m_lazyBackgroundTimer = new QTimer(this);
+        connect(m_lazyBackgroundTimer, &QTimer::timeout, this, [this]() {
+            if (m_lazyLoadActive && !m_lazyLoadingChunk) {
+                loadNextLazyChunk();
+            }
+        });
+    }
+    m_lazyBackgroundTimer->setInterval(300); // progressive loading in background every 300ms
+    m_lazyBackgroundTimer->start();
+
+    emit q_ptr->fileLoaded(filePath);
+    return true;
+}
+
+void CodeEditorPrivate::cancelLazyFileLoad()
+{
+    m_lazyLoadActive = false;
+    m_lazyLoadingChunk = false;
+    if (m_lazyBackgroundTimer) {
+        m_lazyBackgroundTimer->stop();
+    }
+    m_lazyFilePath.clear();
+    m_lazyLoadedBytes = 0;
+    m_lazyTotalBytes = 0;
+}
+
+void CodeEditorPrivate::loadNextLazyChunk()
+{
+    if (!m_lazyLoadActive || m_lazyLoadingChunk || m_lazyLoadedBytes >= m_lazyTotalBytes)
+        return;
+
+    m_lazyLoadingChunk = true;
+    const int generation = m_lazyLoadGeneration;
+
+    auto file = std::make_shared<QFile>(m_lazyFilePath);
+    if (!file->open(QIODevice::ReadOnly)) {
+        m_lazyLoadingChunk = false;
+        return;
+    }
+
+    const qint64 offset = m_lazyLoadedBytes;
+    if (!file->seek(offset)) {
+        file->close();
+        m_lazyLoadingChunk = false;
+        return;
+    }
+
+    const qint64 sizeToRead = qMin<qint64>(m_lazyTotalBytes - offset, 2LL * 1024 * 1024); // 2MB chunk
+
+    auto decodedText = std::make_shared<QString>();
+    QThread* thread = QThread::create([file, sizeToRead, decodedText]() {
+        const QByteArray bytes = file->read(sizeToRead);
+        file->close();
+        *decodedText = QString::fromUtf8(bytes);
+    });
+
+    connect(thread, &QThread::finished, this, [this, thread, decodedText, generation, sizeToRead]() {
+        if (m_lazyLoadActive && generation == m_lazyLoadGeneration) {
+            // Append the chunk to the end of the document
+            QTextCursor cursor(m_editor->document());
+            cursor.movePosition(QTextCursor::End);
+            cursor.insertText(*decodedText);
+
+            m_lazyLoadedBytes += sizeToRead;
+
+            if (m_lazyLoadedBytes >= m_lazyTotalBytes) {
+                // Done loading!
+                finalizeLazyLoad();
+            } else {
+                m_lazyLoadingChunk = false;
+            }
+        } else {
+            m_lazyLoadingChunk = false;
+        }
+        thread->deleteLater();
+    });
+    thread->start();
+}
+
+void CodeEditorPrivate::finalizeLazyLoad()
+{
+    m_lazyLoadActive = false;
+    m_lazyLoadingChunk = false;
+    if (m_lazyBackgroundTimer) {
+        m_lazyBackgroundTimer->stop();
+    }
+
+    m_editor->setReadOnly(m_savedReadOnly);
+    m_editor->setUndoRedoEnabled(true);
+    resumeHeavyEditorFeatures();
+    applyDocumentPerformanceMode(m_lazyTotalBytes);
+    
+    if (m_highlighter) {
+        m_highlighter->rehighlight();
+    }
+
+    m_gutter->updateWidth();
+    m_gutter->update();
+    syncMiniMapVisibility();
+
+    int lines = m_editor->document()->blockCount();
+    int chars = m_editor->document()->characterCount();
+    EditorTelemetry::instance()->endLoadFile(m_lazyFilePath, m_lazyTotalBytes, lines, chars);
+
+    m_lazyFilePath.clear();
+    m_lazyLoadedBytes = 0;
+    m_lazyTotalBytes = 0;
+}
+
+void CodeEditorPrivate::onLazyScroll(int value)
+{
+    if (!m_lazyLoadActive || m_lazyLoadingChunk)
+        return;
+
+    QScrollBar* bar = m_editor->verticalScrollBar();
+    if (!bar || bar->maximum() <= 0)
+        return;
+
+    const int remaining = bar->maximum() - value;
+    if (remaining < 150) { // scrolling near bottom
+        loadNextLazyChunk();
+    }
 }
 
 bool CodeEditorPrivate::startAsyncFileLoad(const QString& filePath)
@@ -2030,6 +2247,8 @@ bool CodeEditorPrivate::startAsyncFileLoad(const QString& filePath)
     m_editor->setReadOnly(true);
     m_editor->setPlainText(QStringLiteral("Loading file asynchronously..."));
     syncMiniMapVisibility();
+
+    EditorTelemetry::instance()->startLoadFile(filePath);
 
     m_asyncLoadThread = QThread::create([mapped, fileSize, decodedText]() {
         *decodedText = QString::fromUtf8(
@@ -2093,6 +2312,11 @@ void CodeEditorPrivate::applyNextTextChunk(int generation)
         m_gutter->updateWidth();
         m_gutter->update();
         syncMiniMapVisibility();
+
+        int lines = m_editor->document()->blockCount();
+        int chars = m_editor->document()->characterCount();
+        EditorTelemetry::instance()->endLoadFile(m_asyncLoadedPath, m_loadedFileSize, lines, chars);
+
         emit q_ptr->fileLoaded(m_asyncLoadedPath);
         m_asyncLoadedText.clear();
         m_asyncLoadedPath.clear();
@@ -2284,8 +2508,16 @@ void CodeEditorPrivate::applyLargeFileWindow(int requestId, qint64 startByte, qi
     }
 }
 
+
+
+
 void CodeEditorPrivate::onLargeFileScroll(int value)
 {
+    if (m_lazyLoadActive) {
+        onLazyScroll(value);
+        return;
+    }
+
     if (!m_largeFileMode || !m_largeFileState || m_largeFileState->ignoreScroll || m_largeFileState->loading)
         return;
 
@@ -2823,17 +3055,31 @@ bool CodeEditor::loadFile(const QString& filePath) {
         if (!d_ptr->enterLargeFileMode(filePath))
             return false;
         emit fileLoaded(filePath);
-    } else if (d_ptr->shouldUseAsyncFullLoad(fileSize)
-               || (d_ptr->shouldUseLargeFileMode(fileSize) && d_ptr->m_preferEditableLargeFiles)) {
+    } else if ((d_ptr->shouldUseLargeFileMode(fileSize) && d_ptr->m_preferEditableLargeFiles)
+               || (fileSize >= 2LL * 1024 * 1024)) {
+        return d_ptr->startLazyFileLoad(filePath);
+    } else if (d_ptr->shouldUseAsyncFullLoad(fileSize)) {
         return d_ptr->startAsyncFileLoad(filePath);
     } else {
         if (!f.open(QIODevice::ReadOnly | QIODevice::Text))
             return false;
         if (d_ptr->m_heavyFeaturesSuspended)
             d_ptr->resumeHeavyEditorFeatures();
+
+        EditorTelemetry::instance()->startLoadFile(filePath);
         setText(QString::fromUtf8(f.readAll()));
         d_ptr->m_loadedFilePath = filePath;
         d_ptr->m_loadedFileSize = fileSize;
+
+        int lines = 0;
+        int chars = 0;
+        QPlainTextEdit* textEdit = d_ptr->m_editor;
+        if (textEdit) {
+            lines = textEdit->document()->blockCount();
+            chars = textEdit->document()->characterCount();
+        }
+        EditorTelemetry::instance()->endLoadFile(filePath, fileSize, lines, chars);
+
         emit fileLoaded(filePath);
     }
     return true;

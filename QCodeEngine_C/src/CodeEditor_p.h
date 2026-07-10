@@ -141,6 +141,15 @@ public:
     qsizetype m_asyncLoadOffset = 0;
     int m_asyncLoadGeneration = 0;
 
+    // Lazy file loading state
+    bool m_lazyLoadActive = false;
+    QString m_lazyFilePath;
+    qint64 m_lazyLoadedBytes = 0;
+    qint64 m_lazyTotalBytes = 0;
+    bool m_lazyLoadingChunk = false;
+    QTimer* m_lazyBackgroundTimer = nullptr;
+    int m_lazyLoadGeneration = 0;
+
     QTimer* m_functionListTimer = nullptr;  // debounces updateFunctionList
     QTimer* m_largeDocHighlightTimer = nullptr;
     int m_pendingLargeDocHighlightLine = -1;
@@ -216,6 +225,11 @@ public:
     void cancelAsyncFileLoad();
     void beginChunkedTextApply(QString text, const QString& filePath);
     void applyNextTextChunk(int generation);
+    bool startLazyFileLoad(const QString& filePath);
+    void cancelLazyFileLoad();
+    void loadNextLazyChunk();
+    void finalizeLazyLoad();
+    void onLazyScroll(int value);
 
 
 

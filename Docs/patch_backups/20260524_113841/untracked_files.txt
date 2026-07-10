@@ -1,0 +1,5 @@
+Docs/FIND_REPLACE_CRASH_REPORT_2026-05-23.md
+Docs/patch_backups/20260524_113841/staged_changes.patch
+Docs/patch_backups/20260524_113841/tracked_changes.patch
+Docs/patch_backups/20260524_113841/untracked_files.txt
+QCodeEngine_C/tests/test_findreplace_crash.cpp

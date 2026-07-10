@@ -2,6 +2,7 @@
 #include <QtCore>
 #include <QtGui>
 #include <QtWidgets>
+#include <QElapsedTimer>
 
 #include <cstddef>
 #include <cstdint>
@@ -12,6 +13,7 @@
 #include <tree_sitter/api.h>
 
 #include "TreeSitterHighlighter.h"
+#include "CodeEditor/EditorTelemetry.h"
 
 namespace {
 
@@ -196,6 +198,9 @@ const QTextDocument* TreeSitterHighlighter::get_document() {
 
 // Handle a changed source.
 void TreeSitterHighlighter::source_changed(int position, int charsRemoved, int charsAdded) {
+    QElapsedTimer timer;
+    timer.start();
+
     if (charsRemoved > 0) {
         const int removePos = qBound(0, position, this->m_sourceCache.size());
         const int removeLen = qBound(0, charsRemoved, this->m_sourceCache.size() - removePos);
@@ -221,6 +226,17 @@ void TreeSitterHighlighter::source_changed(int position, int charsRemoved, int c
     // rehighlight
     this->rehighlight_range(changed_range);
     emit parsed(static_cast<void*>(this->tree));
+
+    double elapsed = timer.nsecsElapsed() / 1000000.0;
+    EditorTelemetry::instance()->recordOperation(
+        QStringLiteral("Highlight (Change)"),
+        QStringLiteral("Pos: %1, -%2, +%3, range: blocks %4-%5")
+            .arg(position)
+            .arg(charsRemoved)
+            .arg(charsAdded)
+            .arg(changed_range.first)
+            .arg(changed_range.second),
+        elapsed);
 }
 
 // Reparse the selected block range.
@@ -310,9 +326,18 @@ void TreeSitterHighlighter::reparse() {
         return;
     }
 
+    QElapsedTimer timer;
+    timer.start();
+
     ts_tree_delete(this->tree);
     this->m_sourceCache = this->document->toPlainText();
     this->tree = ts_parser_parse_string_encoding(this->parser, NULL, (char*)this->m_sourceCache.utf16(), this->m_sourceCache.length() * 2, TSInputEncodingUTF16LE);
+
+    double elapsed = timer.nsecsElapsed() / 1000000.0;
+    EditorTelemetry::instance()->recordOperation(
+        QStringLiteral("TS Reparse (All)"),
+        QStringLiteral("Chars: %1").arg(this->m_sourceCache.length()),
+        elapsed);
 }
 
 // Clear the given block range.
@@ -367,6 +392,7 @@ void TreeSitterHighlighter::rehighlight_range(BlockRange changed_range) {
     // Highlight Captures
     TSQueryMatch match;
     uint32_t capture_index;
+    QTextBlock mainHintBlock = start_block;
     while (ts_query_cursor_next_capture(query_cursor, &match, &capture_index)) {
         TSQueryCapture capture = match.captures[capture_index];
         if (capture.index >= capture_count)
@@ -377,7 +403,7 @@ void TreeSitterHighlighter::rehighlight_range(BlockRange changed_range) {
         if (true) {  // TODO: skip if text_char_format is the standard format.
             // Single line capture
             if (ts_node_start_point(capture.node).row == ts_node_end_point(capture.node).row) {
-                QTextBlock block = this->document->findBlockByNumber(ts_node_start_point(capture.node).row);
+                QTextBlock block = this->findBlockByNumberFast(mainHintBlock, ts_node_start_point(capture.node).row);
                 this->apply_format(text_char_format,
                                    block,
                                    ts_node_start_point(capture.node).column / 2,
@@ -385,7 +411,7 @@ void TreeSitterHighlighter::rehighlight_range(BlockRange changed_range) {
             }
             // Multi line capture
             else if (ts_node_start_point(capture.node).row < ts_node_end_point(capture.node).row) {
-                QTextBlock block = this->document->findBlockByNumber(ts_node_start_point(capture.node).row);
+                QTextBlock block = this->findBlockByNumberFast(mainHintBlock, ts_node_start_point(capture.node).row);
                 this->apply_format(text_char_format, block, ts_node_start_point(capture.node).column / 2, block.length());
                 block = block.next();
                 while (block.isValid() && block.blockNumber() < ts_node_end_point(capture.node).row) {
@@ -436,6 +462,7 @@ void TreeSitterHighlighter::rehighlight_range(BlockRange changed_range) {
                 
                 TSQueryMatch inner_m;
                 uint32_t inner_c_idx;
+                QTextBlock injHintBlock = start_block;
                 while (ts_query_cursor_next_capture(inner_cur, &inner_m, &inner_c_idx)) {
                     TSQueryCapture inner_cap = inner_m.captures[inner_c_idx];
                     if (inner_cap.index >= capture_count)
@@ -443,10 +470,10 @@ void TreeSitterHighlighter::rehighlight_range(BlockRange changed_range) {
                     QTextCharFormat fmt = this->format_lookup_table[inner_cap.index];
                     
                     if (ts_node_start_point(inner_cap.node).row == ts_node_end_point(inner_cap.node).row) {
-                        QTextBlock block = this->document->findBlockByNumber(ts_node_start_point(inner_cap.node).row);
+                        QTextBlock block = this->findBlockByNumberFast(injHintBlock, ts_node_start_point(inner_cap.node).row);
                         this->apply_format(fmt, block, ts_node_start_point(inner_cap.node).column / 2, ts_node_end_point(inner_cap.node).column / 2);
                     } else if (ts_node_start_point(inner_cap.node).row < ts_node_end_point(inner_cap.node).row) {
-                        QTextBlock block = this->document->findBlockByNumber(ts_node_start_point(inner_cap.node).row);
+                        QTextBlock block = this->findBlockByNumberFast(injHintBlock, ts_node_start_point(inner_cap.node).row);
                         this->apply_format(fmt, block, ts_node_start_point(inner_cap.node).column / 2, block.length());
                         block = block.next();
                         while (block.isValid() && block.blockNumber() < ts_node_end_point(inner_cap.node).row) {
@@ -476,7 +503,8 @@ void TreeSitterHighlighter::rehighlight_range(BlockRange changed_range) {
             // the first block we will colour.
             this->accumulate_bracket_depth(root, paren, brace, square, 0, start_block.blockNumber() - 1);
         }
-        this->highlight_rainbow_brackets(ts_tree_root_node(this->tree), paren, brace, square, start_block.blockNumber(), stop_block.blockNumber());
+        QTextBlock rainbowHintBlock = start_block;
+        this->highlight_rainbow_brackets(ts_tree_root_node(this->tree), paren, brace, square, start_block.blockNumber(), stop_block.blockNumber(), rainbowHintBlock);
     }
 
     const int dirtyStart = start_block.position();
@@ -485,7 +513,7 @@ void TreeSitterHighlighter::rehighlight_range(BlockRange changed_range) {
         this->document->markContentsDirty(dirtyStart, dirtyEnd - dirtyStart);
 }
 
-void TreeSitterHighlighter::highlight_rainbow_brackets(TSNode node, int& paren, int& brace, int& square, int start_row, int end_row) {
+void TreeSitterHighlighter::highlight_rainbow_brackets(TSNode node, int& paren, int& brace, int& square, int start_row, int end_row, QTextBlock& hintBlock) {
     if ((int)ts_node_end_point(node).row < start_row) return;
     if ((int)ts_node_start_point(node).row > end_row) return;
 
@@ -509,14 +537,14 @@ void TreeSitterHighlighter::highlight_rainbow_brackets(TSNode node, int& paren, 
                     QColor fallback[] = { Qt::red, QColor(255, 165, 0), Qt::yellow, Qt::green, Qt::cyan, Qt::magenta };
                     fmt.setForeground(fallback[depth % 6]);
                 }
-                QTextBlock block = this->document->findBlockByNumber(row);
+                QTextBlock block = this->findBlockByNumberFast(hintBlock, row);
                 this->apply_format(fmt, block, ts_node_start_point(node).column / 2, ts_node_end_point(node).column / 2);
             }
         }
     } else {
         uint32_t count = ts_node_child_count(node);
         for (uint32_t i = 0; i < count; ++i) {
-            highlight_rainbow_brackets(ts_node_child(node, i), paren, brace, square, start_row, end_row);
+            highlight_rainbow_brackets(ts_node_child(node, i), paren, brace, square, start_row, end_row, hintBlock);
         }
     }
 }
@@ -554,9 +582,18 @@ void TreeSitterHighlighter::rehighlight() {
         return;
     }
 
+    QElapsedTimer timer;
+    timer.start();
+
     BlockRange changed_range = BlockRange(this->document->firstBlock().blockNumber(), this->document->lastBlock().blockNumber());
     this->rehighlight_range(changed_range);
     emit parsed(static_cast<void*>(this->tree));
+
+    double elapsed = timer.nsecsElapsed() / 1000000.0;
+    EditorTelemetry::instance()->recordOperation(
+        QStringLiteral("TS Rehighlight (All)"),
+        QStringLiteral("Blocks: %1").arg(this->document->blockCount()),
+        elapsed);
 }
 
 void TreeSitterHighlighter::rehighlightAroundBlock(int centerBlock, int radius)
@@ -564,12 +601,25 @@ void TreeSitterHighlighter::rehighlightAroundBlock(int centerBlock, int radius)
     if (!this->document)
         return;
 
+    QElapsedTimer timer;
+    timer.start();
+
     const int maxBlock = qMax(0, this->document->blockCount() - 1);
     const int clampedCenter = qBound(0, centerBlock, maxBlock);
     const int clampedRadius = qMax(0, radius);
     const int first = qMax(0, clampedCenter - clampedRadius);
     const int last = qMin(maxBlock, clampedCenter + clampedRadius);
     this->rehighlight_range(BlockRange(first, last));
+
+    double elapsed = timer.nsecsElapsed() / 1000000.0;
+    EditorTelemetry::instance()->recordOperation(
+        QStringLiteral("Highlight (Local)"),
+        QStringLiteral("Center: %1, radius: %2, range: %3-%4")
+            .arg(centerBlock)
+            .arg(radius)
+            .arg(first)
+            .arg(last),
+        elapsed);
 }
 
 // Get the QTextCharFormat from format_map which shares the longes matching (dot separated) prefix with name.
@@ -624,4 +674,23 @@ inline void TreeSitterHighlighter::apply_format(QTextCharFormat format, QTextBlo
     QList<QTextLayout::FormatRange> ranges = block.layout()->formats();
     ranges << r;
     block.layout()->setFormats(ranges);
+}
+
+QTextBlock TreeSitterHighlighter::findBlockByNumberFast(QTextBlock& hintBlock, int targetRow) {
+    if (!this->document) {
+        return QTextBlock();
+    }
+    if (!hintBlock.isValid()) {
+        hintBlock = this->document->firstBlock();
+    }
+    while (hintBlock.isValid() && hintBlock.blockNumber() < targetRow) {
+        hintBlock = hintBlock.next();
+    }
+    while (hintBlock.isValid() && hintBlock.blockNumber() > targetRow) {
+        hintBlock = hintBlock.previous();
+    }
+    if (!hintBlock.isValid()) {
+        hintBlock = this->document->findBlockByNumber(targetRow);
+    }
+    return hintBlock;
 }

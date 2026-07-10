@@ -50,6 +50,8 @@ add_library(QCodeEngine_C
     src/LineHighlighter.cpp
     include/CodeEditor/diagnosticmanager.h include/CodeEditor/diagnosticmanager.cpp
     src/syntaxerrordetector.h src/syntaxerrordetector.cpp
+    include/CodeEditor/EditorTelemetry.h src/EditorTelemetry.cpp
+    include/CodeEditor/PerformanceMonitorWindow.h src/PerformanceMonitorWindow.cpp
 )
 
 
